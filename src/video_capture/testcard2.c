@@ -223,24 +223,12 @@ static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
                 free(surface.data);
         }
 
-        if(vidcap_params_get_flags(params) & VIDCAP_FLAG_AUDIO_EMBEDDED) {
-                s->grab_audio = TRUE;
-                if(configure_audio(s) != 0) {
-                        s->grab_audio = FALSE;
-                        fprintf(stderr, "[testcard2] Disabling audio output. "
-                                        "\n");
-                }
-        } else {
-                s->grab_audio = FALSE;
-        }
-
         s->count = 0;
         s->audio_remained = 0.0;
         s->seconds_tone_played = 0.0;
         s->play_audio_frame = FALSE;
 
         platform_sem_init(&s->semaphore, 0, 0);
-        printf("Testcard capture set to %dx%d\n", s->desc.width, s->desc.height);
 
         if(vidcap_params_get_flags(params) & VIDCAP_FLAG_AUDIO_EMBEDDED) {
                 s->grab_audio = TRUE;
@@ -257,7 +245,10 @@ static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
                 s->audio_tone = NULL;
                 s->audio_silence = NULL;
         }
-        
+
+        log_msg(LOG_LEVEL_INFO, MOD_NAME "capture set to %dx%d @%.2gp, codec %s, bpc %d, pattern: %s, audio %s\n",
+                s->desc.width, s->desc.height, s->desc.fps, get_codec_name(s->desc.color_spec),
+                get_bits_per_component(s->desc.color_spec), "bars", s->grab_audio ? "on" : "off");
         gettimeofday(&s->start_time, NULL);
         
         pthread_mutex_init(&s->lock, NULL);
