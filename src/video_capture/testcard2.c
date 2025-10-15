@@ -50,7 +50,6 @@
 #include "utils/macros.h"
 #include "utils/thread.h"
 #include "video.h"
-#include "video_codec.h"
 #include "video_capture.h"
 #include "testcard_common.h"
 #include "compat/platform_semaphore.h"
