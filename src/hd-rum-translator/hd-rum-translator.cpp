@@ -321,6 +321,15 @@ static int create_output_port(struct hd_rum_translator_state *s,
         const char *addr, int rx_port, int tx_port, int bufsize, bool force_ip_version,
         const char *compression, int mtu, const char *fec, int bitrate)
 {
+        // Check for duplicate target (same host and port)
+        for (const auto *existing : s->replicas) {
+            if (existing->host == addr && existing->m_tx_port == tx_port) {
+                const char *err_msg = "target already exists with same host and port";
+                log_msg(LOG_LEVEL_ERROR, "%s: %s:%d\n", err_msg, addr, tx_port);
+                return -1;
+            }
+        }
+
         struct replica *rep;
         try {
             rep = new replica(addr, rx_port, tx_port, bufsize, &s->mod, force_ip_version);
@@ -398,6 +407,25 @@ static void *writer(void *arg)
                     s->replicas.erase(s->replicas.begin() + index);
                     log_msg(LOG_LEVEL_NOTICE, "Deleted output port %d.\n", index);
                 }
+            } else if (strcasecmp(msg->text, "list-targets") == 0) {
+                ostringstream oss;
+                if (s->replicas.empty()) {
+                    oss << "No targets configured.\n";
+                } else {
+                    oss << "Active targets (" << s->replicas.size() << "):\n";
+                    for (size_t i = 0; i < s->replicas.size(); i++) {
+                        const auto *replica = s->replicas[i];
+                        oss << "  [" << i << "] " << replica->host << ":" << replica->m_tx_port;
+                        if (replica->type == replica::type_t::RECOMPRESS) {
+                            oss << " (transcoding)";
+                        } else if (replica->type == replica::type_t::USE_SOCK) {
+                            oss << " (forwarding)";
+                        }
+                        oss << "\n";
+                    }
+                }
+                log_msg(LOG_LEVEL_INFO, "%s", oss.str().c_str());
+                r = new_response(RESPONSE_OK, oss.str().c_str());
             } else if (strncasecmp(msg->text, "create-port", strlen("create-port")) == 0) {
                 // format of parameters is either:
                 // <host>:<port> [<compression>]
