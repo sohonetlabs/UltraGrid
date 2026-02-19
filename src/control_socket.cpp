@@ -591,6 +591,11 @@ static int process_msg(struct control_state *s, fd_t client_fd, char *message, s
                 strncpy(msg->text, message, sizeof msg->text - 1);
                 msg->text[sizeof msg->text - 1] = '\0';
                 resp = send_message(s->root_module, path, (struct message *) msg);
+        } else if(strcasecmp(message, "list") == 0) {
+                struct msg_universal *msg = (struct msg_universal *)
+                        new_message(sizeof(struct msg_universal));
+                strncpy(msg->text, "list", sizeof(msg->text) - 1);
+                resp = send_message_sync(s->root_module, "root", (struct message *) msg, 1000, SEND_MESSAGE_FLAG_NO_STORE);
         } else if(strcasecmp(message, "bye") == 0) {
                 ret = CONTROL_CLOSE_HANDLE;
                 resp = new_response(RESPONSE_OK, NULL);
