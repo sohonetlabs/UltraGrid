@@ -178,6 +178,7 @@ static void qdestroy(struct item *queue);
 static void *writer(void *arg);
 static void signal_handler(int signal);
 void exit_uv(int status);
+string replicas_to_json_str(const struct hd_rum_translator_state*)
 
 /*
  * this is currently only placeholder to substitute UG default
