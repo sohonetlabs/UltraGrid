@@ -178,7 +178,7 @@ static void qdestroy(struct item *queue);
 static void *writer(void *arg);
 static void signal_handler(int signal);
 void exit_uv(int status);
-string replicas_to_json_str(const struct hd_rum_translator_state*);
+string replicas_to_str(const struct hd_rum_translator_state*);
 
 /*
  * this is currently only placeholder to substitute UG default
@@ -321,29 +321,22 @@ static VOID CALLBACK wsa_deleter(DWORD /* dwErrorCode */,
 #endif
 
 /**
- * Create a string in a JSON representation of the replicas in the
- * translator state. The base key is "replicas" which provides a list
- * of objects containing the "host" and "port" keys.
+ * Create a formatted string of the replicas in the
+ * translator state. The format is a list of comma delimited replicas
+ * which itself is pipe delimited between the host and port.
  *
  * @param s The HD-Rum-Translator state.
- * @return std::string A JSON representation of the replicas in the state.
+ * @return std::string A representation of the replicas in the state.
  */
-string replicas_to_json_str(const struct hd_rum_translator_state* s) {
+string replicas_to_str(const struct hd_rum_translator_state* s) {
     ostringstream oss;
-    oss << "{\"replicas\": [";
     size_t replicas_size = s->replicas.size();
     for(size_t i = 0; i < replicas_size; i++) {
-        oss << "{";
-        oss << "\"host\": \"" << s->replicas[i]->host << "\"";
-        oss << ",";
-        oss << "\"port\": " << s->replicas[i]->m_tx_port;
-        oss << "}";
-
+        oss << s->replicas[i]->host << "|" << s->replicas[i]->m_tx_port;
         if(i < replicas_size - 1) {
             oss << ",";
         }
     }
-    oss << "]}\n";
     return oss.str();
 }
 
@@ -477,7 +470,7 @@ static void *writer(void *arg)
             }
             else if (strcasecmp(msg->text, "list") == 0) {
                 LOG(LOG_LEVEL_INFO) << MOD_NAME << "Getting target list\n";
-                auto replica_json = replicas_to_json_str(s);
+                auto replica_json = replicas_to_str(s);
                 r = new_response(RESPONSE_OK, replica_json.c_str());
             }
             else {
