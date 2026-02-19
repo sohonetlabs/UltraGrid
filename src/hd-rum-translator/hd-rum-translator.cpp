@@ -321,6 +321,14 @@ static int create_output_port(struct hd_rum_translator_state *s,
         const char *addr, int rx_port, int tx_port, int bufsize, bool force_ip_version,
         const char *compression, int mtu, const char *fec, int bitrate)
 {
+        // Check for duplicate target (same host and port)
+        for (const auto *existing : s->replicas) {
+            if (existing->host == addr && existing->m_tx_port == tx_port) {
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME << "Target (" << addr << " - " << tx_port << ") already exists\n";
+                return -1;
+            }
+        }
+
         struct replica *rep;
         try {
             rep = new replica(addr, rx_port, tx_port, bufsize, &s->mod, force_ip_version);
