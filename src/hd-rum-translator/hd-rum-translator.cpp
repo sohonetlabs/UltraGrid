@@ -82,6 +82,8 @@ using namespace std;
 using s = rang::style;
 using fg = rang::fg;
 constexpr const char *MOD_NAME = "[hd-rum-trans] ";
+constexpr long NSEC_PER_SEC = 1000000000L;
+constexpr long ONE_HUNDRED_MS_IN_NS = 100 * 1000 * 1000L;
 
 struct item;
 
@@ -176,6 +178,7 @@ static void qdestroy(struct item *queue);
 static void *writer(void *arg);
 static void signal_handler(int signal);
 void exit_uv(int status);
+string replicas_to_str(const struct hd_rum_translator_state*);
 
 /*
  * this is currently only placeholder to substitute UG default
@@ -317,10 +320,38 @@ static VOID CALLBACK wsa_deleter(DWORD /* dwErrorCode */,
 }
 #endif
 
+/**
+ * Create a formatted string of the replicas in the
+ * translator state. The format is a list of comma delimited replicas
+ * which itself is pipe delimited between the host and port.
+ *
+ * @param s The HD-Rum-Translator state.
+ * @return std::string A representation of the replicas in the state.
+ */
+string replicas_to_str(const struct hd_rum_translator_state* s) {
+    ostringstream oss;
+    size_t replicas_size = s->replicas.size();
+    for(size_t i = 0; i < replicas_size; i++) {
+        oss << s->replicas[i]->host << "|" << s->replicas[i]->m_tx_port;
+        if(i < replicas_size - 1) {
+            oss << ",";
+        }
+    }
+    return oss.str();
+}
+
 static int create_output_port(struct hd_rum_translator_state *s,
         const char *addr, int rx_port, int tx_port, int bufsize, bool force_ip_version,
         const char *compression, int mtu, const char *fec, int bitrate)
 {
+        // Check for duplicate target (same host and port)
+        for (const auto *existing : s->replicas) {
+            if (existing->host == addr && existing->m_tx_port == tx_port) {
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME << "Target (" << addr << " - " << tx_port << ") already exists\n";
+                return -1;
+            }
+        }
+
         struct replica *rep;
         try {
             rep = new replica(addr, rx_port, tx_port, bufsize, &s->mod, force_ip_version);
@@ -444,7 +475,13 @@ static void *writer(void *arg)
                 else
                     log_msg(LOG_LEVEL_NOTICE, "Created new forwarding output port %s:%d.\n", host, tx_port);
 
-            } else {
+            }
+            else if (strcasecmp(msg->text, "list") == 0) {
+                LOG(LOG_LEVEL_INFO) << MOD_NAME << "Getting target list\n";
+                auto replica_json = replicas_to_str(s);
+                r = new_response(RESPONSE_OK, replica_json.c_str());
+            }
+            else {
                 r = new_response(RESPONSE_BAD_REQUEST, NULL);
             }
 
@@ -511,8 +548,22 @@ static void *writer(void *arg)
         }
 
         pthread_mutex_lock(&s->qempty_mtx);
-        if (s->qempty)
-            pthread_cond_wait(&s->qempty_cond, &s->qempty_mtx);
+        if (s->qempty) {
+            // Get current time
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+
+            // Handle nanosecond overflow
+            ts.tv_nsec += ONE_HUNDRED_MS_IN_NS;
+            if (ts.tv_nsec >= NSEC_PER_SEC) {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= NSEC_PER_SEC;
+            }
+
+            // Wait until we get either get a packet, or a timeout (so we can handle
+            // incoming commands).
+            pthread_cond_timedwait(&s->qempty_cond, &s->qempty_mtx, &ts);
+        }
         s->qempty = 1;
         pthread_mutex_unlock(&s->qempty_mtx);
     }
