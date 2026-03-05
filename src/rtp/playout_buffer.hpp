@@ -16,6 +16,7 @@
 #include <list>
 #include <mutex>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "rtp/rtp.h"
@@ -86,6 +87,8 @@ public:
     unsigned int getRtpTimestamp();
     bool isComplete();
     bool isReady();
+    bool isOverdue();
+    std::chrono::high_resolution_clock::time_point getDeletionTime();
     std::optional<std::reference_wrapper<rtp_packet>> getPacket(size_t index);
     // Setters
     void markComplete();
@@ -109,10 +112,14 @@ private:
 
 class PlayoutBuffer {
 public:
-    explicit PlayoutBuffer(volatile int* delayMs);
+    // ~10 seconds at 90kHz RTP clock — used to detect 32-bit timestamp wraparound
+    static constexpr unsigned int WRAPAROUND_THRESHOLD = 900000;
+
+    explicit PlayoutBuffer(volatile int* delayMs, const std::string& streamId = "unknown");
 
     void insert(rtp_packet* packet);
     std::unique_ptr<BufferFrame> popNextDisplayReadyFrame();
+    void remove();
 
     void setPlayoutDelay(long long playoutDelayUs);
 
@@ -126,6 +133,8 @@ private:
 
     long long playoutDelayUs; // The delay for playing out in nanoseconds
     volatile int *offsetMs;   // The offset in milliseconds
+
+    std::string streamIdentifier; // Identifies which stream this buffer belongs to
 
     std::mutex frameMutex;    // A mutex used for locking the frame list before
                               // it is accessed

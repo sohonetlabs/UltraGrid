@@ -4,12 +4,12 @@
  *  @brief The constructor for a participant.
  */
 template<typename State>
-Participant<State>::Participant(unsigned int ssrc, volatile int *delayMs) : ssrc(ssrc) {
+Participant<State>::Participant(unsigned int ssrc, volatile int *delayMs, const std::string& streamId) : ssrc(ssrc) {
     // Mark the time this object was created as now
     this->creationTime = std::chrono::high_resolution_clock::now();
 
-    // Create a playout buffer for the participant
-    this->playoutBuffer = std::make_unique<PlayoutBuffer>(delayMs);
+    // Create a playout buffer for the participant, passing stream identifier for log messages
+    this->playoutBuffer = std::make_unique<PlayoutBuffer>(delayMs, streamId);
 
     // Initialise all SDES attributes as empty strings
     this->sdesCname    = std::string();
@@ -149,7 +149,7 @@ void Participant<State>::processSdes(rtcp_sdes_item* sdesItem) {
  *  @brief The constructor for the participant database.
  */
 template<typename State>
-ParticipantDB<State>::ParticipantDB(volatile int* delayMs) : delayMs(delayMs) {
+ParticipantDB<State>::ParticipantDB(volatile int* delayMs, const std::string& streamId) : delayMs(delayMs), streamIdentifier(streamId) {
     // Intialise the map
     this->participants = std::map<unsigned int, std::unique_ptr<Participant<State>>>();
 }
@@ -191,9 +191,9 @@ typename ParticipantDB<State>::const_iterator ParticipantDB<State>::cend() const
  */
 template<typename State>
 void ParticipantDB<State>::addParticipant(unsigned int ssrc) {
-    LOG(LOG_LEVEL_INFO) << "Adding a new participant: " << std::hex << ssrc << "\n";
+    LOG(LOG_LEVEL_INFO) << "[" << this->streamIdentifier << "] Adding a new participant: " << std::hex << ssrc << "\n";
     // Create the participant
-    std::unique_ptr<Participant<State>> participant = std::make_unique<Participant<State>>(ssrc, this->delayMs);
+    std::unique_ptr<Participant<State>> participant = std::make_unique<Participant<State>>(ssrc, this->delayMs, this->streamIdentifier);
     // Insert the participant into the map
     this->participants.insert(std::make_pair(ssrc, std::move(participant)));
 }
@@ -212,15 +212,11 @@ bool ParticipantDB<State>::exists(unsigned int ssrc) {
  */
 template<typename State>
 std::optional<std::reference_wrapper<Participant<State>>> ParticipantDB<State>::getParticipant(unsigned int ssrc) {
-    try {
-        // Grab a reference to the unique pointer and return it. Do not make it a const, because the state
-        // can be written to it.
-        return std::make_optional(std::ref(*(this->participants.at(ssrc).get())));
+    auto it = this->participants.find(ssrc);
+    if (it != this->participants.end()) {
+        return std::make_optional(std::ref(*(it->second.get())));
     }
-    catch(std::out_of_range& ex) {
-        // Return a nullified optional if the participant does not exist
-        return std::nullopt;
-    }
+    return std::nullopt;
 }
 
 template<typename State>

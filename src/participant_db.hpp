@@ -47,7 +47,7 @@ struct state_audio_decoder;
 template<typename State>
 class Participant {
 public:
-    Participant(unsigned int ssrc, volatile int *delayMs);
+    Participant(unsigned int ssrc, volatile int *delayMs, const std::string& streamId = "unknown");
     ~Participant();
 
     State* getState();
@@ -81,7 +81,7 @@ private:
 template<typename State>
 class ParticipantDB {
 public:
-    explicit ParticipantDB(volatile int* delayMs);
+    explicit ParticipantDB(volatile int* delayMs, const std::string& streamId = "unknown");
 
     // Set up the iterators so that outside classes can simply iterate over the top of the participant DB
     using iterator = typename std::map<unsigned int, std::unique_ptr<Participant<State>>>::iterator;
@@ -102,6 +102,7 @@ public:
 private:
     std::map<unsigned int, std::unique_ptr<Participant<State>>> participants;
     volatile int* delayMs;
+    std::string streamIdentifier;
 };
 
 // Explicitly declare our use of the participant DB with the states so it'll compile

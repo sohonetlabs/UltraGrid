@@ -11,10 +11,10 @@
 /**
   *  @brief Constructor for the playout buffer to initialise the defaults
   */
-PlayoutBuffer::PlayoutBuffer(volatile int* delayMs) : offsetMs(delayMs) {
+PlayoutBuffer::PlayoutBuffer(volatile int* delayMs, const std::string& streamId) : offsetMs(delayMs), streamIdentifier(streamId) {
     // Playout delay... should really be adaptive, based on the
     // jitter, but we use a (conservative) fixed 32ms delay for
-    // now (2 video frames at 60fps).                          
+    // now (2 video frames at 60fps).
     this->playoutDelayUs = DELAY_NANOSECONDS;
     this->stats = PlayoutBufferStats();
 }
@@ -48,8 +48,9 @@ void PlayoutBuffer::insert(rtp_packet* packet) {
         else if(this->frames.empty()) {
             this->createFrame(std::move(uPacket), false);
         }
-        // Check to see if the packet belongs to a new frame
-        else if(this->frames.back()->getRtpTimestamp() < packetTimestamp) {
+        // Check to see if the packet belongs to a new frame (with wraparound handling)
+        else if(this->frames.back()->getRtpTimestamp() < packetTimestamp ||
+                this->frames.back()->getRtpTimestamp() - packetTimestamp > UINT32_MAX - WRAPAROUND_THRESHOLD) {
             // Mark the last frame as complete so it will be recognised as being ready to leave
             this->frames.back()->markComplete();
             // Create and insert new frame, with packet
@@ -61,11 +62,12 @@ void PlayoutBuffer::insert(rtp_packet* packet) {
             // be receiving packets for a frame AFTER we have received packets for a later frame.
             this->createFrame(std::move(uPacket), false);
         }
-        // Check to see if the packet belongs to an old frame that has already been played out
-        else if(this->frames.front()->getRtpTimestamp() > packetTimestamp) {
+        // Check to see if the packet belongs to an old frame that has already been played out (with wraparound handling)
+        else if(this->frames.front()->getRtpTimestamp() > packetTimestamp ||
+                packetTimestamp - this->frames.front()->getRtpTimestamp() > UINT32_MAX - WRAPAROUND_THRESHOLD) {
             // There is not a lot we can do in this implementation because the frame will already be played
             // out. Simply log that it's happened
-            LOG(LOG_LEVEL_WARNING) << "[pbuf] Found a frame with timestamp: " << packetTimestamp << " - The frame has likely already been played. Discarding.\n";
+            LOG(LOG_LEVEL_WARNING) << "[" << this->streamIdentifier << "][pbuf] Found a frame with timestamp: " << packetTimestamp << " - The frame has likely already been played. Discarding.\n";
         }
     }
 
@@ -73,7 +75,7 @@ void PlayoutBuffer::insert(rtp_packet* packet) {
     if(uPacket != nullptr) {
         // If it has not been passed on enter a log with the RTP Timestamp explaining that the packet
         // has been dropped.
-        LOG(LOG_LEVEL_WARNING) << "Discarding frame with timestamp: " << packetTimestamp << "\n";
+        LOG(LOG_LEVEL_WARNING) << "[" << this->streamIdentifier << "] Discarding frame with timestamp: " << packetTimestamp << "\n";
     }
 }
 
@@ -97,11 +99,23 @@ std::unique_ptr<BufferFrame> PlayoutBuffer::popNextDisplayReadyFrame() {
         // Try getting the lock used to access the frame list
         std::unique_lock<std::mutex> lock = std::unique_lock<std::mutex>(this->frameMutex);
 
+        // Force-complete frames whose playout time was more than 1 second ago.
+        // This prevents incomplete frames from blocking the buffer forever if a stream stalls.
+        for (auto& f : this->frames) {
+            if (!f->isComplete() && f->isOverdue()) {
+                f->markComplete();
+                LOG(LOG_LEVEL_DEBUG) << "[" << this->streamIdentifier << "][pbuf] Force-completing stale frame (RTP TS=" << f->getRtpTimestamp() << ")\n";
+            }
+            if (!f->isReady()) {
+                break; // Frames are ordered by time; no point checking further
+            }
+        }
+
         // Create a function that tests is a frame is "display ready". I.e: Has its playout time passed and is the frame "complete".
         auto frameDisplayReadyComparator = [] (std::unique_ptr<BufferFrame>& bufferFrame) {
             return bufferFrame->isReady() && bufferFrame->isComplete();
         };
-        
+
         // Find the first instance of a frame that is ready to display
         auto firstDisplayReadyFrameIt = std::find_if(this->frames.begin(), this->frames.end(), frameDisplayReadyComparator);
         // Check that we found a frame
@@ -120,7 +134,25 @@ std::unique_ptr<BufferFrame> PlayoutBuffer::popNextDisplayReadyFrame() {
 }
 
 /**
- * @brief A helper function for creating a frame from the data in an RTP packet, adding the packet, and pushing the 
+ * @brief Remove stale frames from the front of the buffer whose deletion time has passed.
+ *        Prevents undecoded frames from accumulating indefinitely.
+ */
+void PlayoutBuffer::remove() {
+    std::unique_lock<std::mutex> lock(this->frameMutex);
+    auto now = std::chrono::high_resolution_clock::now();
+    auto it = this->frames.begin();
+    while (it != this->frames.end()) {
+        if (now > (*it)->getDeletionTime() && (*it)->isComplete()) {
+            it = this->frames.erase(it);
+        } else {
+            // The buffer is ordered, so once we see a non-expired frame we can stop
+            break;
+        }
+    }
+}
+
+/**
+ * @brief A helper function for creating a frame from the data in an RTP packet, adding the packet, and pushing the
  *        frame into the frames list. Optionally lets you use a local lock for the object (useful if the lock is
  *        acquired elsewhere at the same time).
 */
@@ -187,7 +219,7 @@ bool PlayoutBuffer::isFrameReady() {
                     break;
                 }
                 else {
-                    LOG(LOG_LEVEL_DEBUG) << "[pbuf] Frame not playing because it has not been marked as complete. RTP Timestamp: " << frame->getRtpTimestamp() << "\n";
+                    LOG(LOG_LEVEL_DEBUG) << "[" << this->streamIdentifier << "][pbuf] Frame not playing because it has not been marked as complete. RTP Timestamp: " << frame->getRtpTimestamp() << "\n";
                 }
             }
         }
@@ -321,6 +353,21 @@ bool BufferFrame::isReady() {
 }
 
 /**
+ * @brief Returns true if the frame's playout time was more than 1 second ago.
+ *        Used to force-complete stale incomplete frames that would otherwise block the buffer.
+ */
+bool BufferFrame::isOverdue() {
+    return std::chrono::high_resolution_clock::now() > this->playoutTime + std::chrono::seconds(1);
+}
+
+/**
+ * @brief Getter for the deletion time of the frame
+ */
+std::chrono::high_resolution_clock::time_point BufferFrame::getDeletionTime() {
+    return this->deletionTime;
+}
+
+/**
  * @brief Get the amount of packets stored within the frame buffer
 */
 size_t BufferFrame::size() {
@@ -332,15 +379,10 @@ size_t BufferFrame::size() {
  *        the reference.
  */
 std::optional<std::reference_wrapper<rtp_packet>> BufferFrame::getPacket(size_t index) {
-    try {
-        // Grab a reference to the unique pointer and return it. Do not make it a const, because the state
-        // can be written to it.
-        return std::make_optional(std::ref(*(this->packets.at(index).get())));
+    if (index < this->packets.size()) {
+        return std::make_optional(std::ref(*(this->packets[index].get())));
     }
-    catch(std::out_of_range& ex) {
-        // Return a nullified optional if the participant does not exist
-        return std::nullopt;
-    }
+    return std::nullopt;
 }
 
 /**
@@ -388,27 +430,38 @@ BufferFrame::const_iterator BufferFrame::cend() const {
 #define STAT_INT_MIN_DIVISOR (sizeof(unsigned long long) * __CHAR_BIT__)
 
 /**
- * @brief Compute the longest gap between packets that are missing
+ * @brief Compute the longest gap between packets that are missing.
+ *        Tracks accumulated_loss across word boundaries to catch gaps
+ *        that span multiple words (e.g., 70+ consecutive lost packets).
 */
-static void ComputeLongestGap(int *longestGap, unsigned long long packets)
+static int GetConsecutiveZeros(unsigned long long packets)
 {
-        #define NUMBER_OF_BITS (sizeof packets * __CHAR_BIT__)
-        if (*longestGap == NUMBER_OF_BITS) {
-                return;
-        }
+        int longest_gap = 0;
         if (packets == 0) {
-                *longestGap = NUMBER_OF_BITS;
-                return;
+                return (int)(sizeof packets * __CHAR_BIT__);
         }
         if (packets == ULLONG_MAX) {
-                return;
+                return 0;
         }
-
-        *longestGap = std::max(*longestGap, __builtin_clzll(packets));
-
+        longest_gap = std::max(longest_gap, __builtin_clzll(packets));
         while (packets != 0) {
-                *longestGap = std::max(*longestGap, __builtin_ctzll(packets));
+                longest_gap = std::max(longest_gap, __builtin_ctzll(packets));
                 packets >>= 1;
+        }
+        return longest_gap;
+}
+
+static void ComputeLongestGap(int *longestGap, int *accumulatedLoss, unsigned long long packets)
+{
+        *longestGap = std::max(*longestGap, GetConsecutiveZeros(packets));
+        // trailing_zeros counts packets missing at the start of the word group,
+        // leading_zeros counts packets missing at the end
+        int leading_zeros = packets == 0 ? (int)NUMBER_WORD_BITS : __builtin_clzll(packets);
+        int trailing_zeros = packets == 0 ? (int)NUMBER_WORD_BITS : __builtin_ctzll(packets);
+        *accumulatedLoss += trailing_zeros;
+        *longestGap = std::max(*longestGap, *accumulatedLoss);
+        if (leading_zeros < (int)NUMBER_WORD_BITS) { // at least one packet present, reset the counter
+                *accumulatedLoss = leading_zeros;
         }
 }
 
@@ -539,10 +592,11 @@ void PlayoutBufferStats::processStats(const std::unique_ptr<rtp_packet>& packet)
     if((dist >= this->statsInterval * 2) && (dist < uint16MaxHalf)) {
         // Sum up only up to stats interval to be able to catch out-of-order packets.
         auto reportSeqUntil = (uint16_t)((floor((double)packet->seq / this->statsInterval) - 1) * this->statsInterval);
+        int accumulatedLoss = 0;
         for(uint16_t i = this->lastReportSequence; i != reportSeqUntil; i += NUMBER_WORD_BITS) {
             this->expectedPackets += NUMBER_WORD_BITS;
             this->receivedPackets += __builtin_popcountll(this->packets[i / NUMBER_WORD_BITS]);
-            ComputeLongestGap(&this->longestGap, this->packets[i / NUMBER_WORD_BITS]);
+            ComputeLongestGap(&this->longestGap, &accumulatedLoss, this->packets[i / NUMBER_WORD_BITS]);
             this->packets[i / NUMBER_WORD_BITS] = 0;
         }
         this->expectedPacketsTotal += this->expectedPackets;
