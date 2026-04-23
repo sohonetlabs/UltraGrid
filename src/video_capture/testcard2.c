@@ -78,10 +78,10 @@
 #define FONT_HEIGHT 108
 #define MOD_NAME "[testcard2] "
 #define RECT1_BASE_STEP_PX 6  ///< rounded up to dest pixfmt block size
-#define RECT1_SIZE_PX 300     ///< square edge
+#define RECT1_SIZE_PX (13 * PIX_BLOCK_LCM) ///< square edge; multiple of LCM of block pixels for supported formats
 #define RECT2_BASE_STEP_PX 12 ///< rounded up to dest pixfmt block size
 #define RECT2_FILL_COLOR 0xFFFF00AAU ///< RGBA purple (R=AA G=00 B=FF A=FF); rect1 fill is implicit black from zero-init
-#define RECT2_SIZE_PX 96      ///< square edge
+#define RECT2_SIZE_PX (4 * PIX_BLOCK_LCM) ///< square edge; multiple of LCM of block pixels for supported formats
 #define RECT2_Y_STEP_PX 9     ///< vertical step; no block-alignment needed (lines independent)
 
 #ifdef HAVE_LIBSDL_TTF
