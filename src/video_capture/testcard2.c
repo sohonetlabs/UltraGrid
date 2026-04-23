@@ -75,9 +75,14 @@
 #define BANNER_MARGIN_BOTTOM 75L
 #define BUFFER_SEC 1
 #define DEFAULT_FORMAT "1920:1080:24:UYVY"
-#define EPS_PLUS_1 1.0001
 #define FONT_HEIGHT 108
 #define MOD_NAME "[testcard2] "
+#define RECT1_BASE_STEP_PX 6  ///< rounded up to dest pixfmt block size
+#define RECT1_SIZE_PX (13 * PIX_BLOCK_LCM) ///< square edge; multiple of LCM of block pixels for supported formats
+#define RECT2_BASE_STEP_PX 12 ///< rounded up to dest pixfmt block size
+#define RECT2_FILL_COLOR 0xFFFF00AAU ///< RGBA purple (R=AA G=00 B=FF A=FF); rect1 fill is implicit black from zero-init
+#define RECT2_SIZE_PX (4 * PIX_BLOCK_LCM) ///< square edge; multiple of LCM of block pixels for supported formats
+#define RECT2_Y_STEP_PX 9     ///< vertical step; no block-alignment needed (lines independent)
 
 #ifdef HAVE_LIBSDL_TTF
 #ifdef _WIN32
@@ -171,10 +176,6 @@ static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
                         break;
                 }
                 s->desc.width = atoi(tmp);
-                if(s->desc.width % 2 != 0) {
-                        log_msg(LOG_LEVEL_ERROR, "Width must be multiple of 2.\n");
-                        break;
-                }
                 if (!(tmp = strtok_r(NULL, ":", &save_ptr))) {
                         log_msg(LOG_LEVEL_ERROR, "Missing height for testcard\n");
                         break;
@@ -191,6 +192,13 @@ static int vidcap_testcard2_init(struct vidcap_params *params, void **state)
                         break;
                 }
                 s->desc.color_spec = get_codec_from_name(tmp);
+
+                int block_px = get_pf_block_pixels(s->desc.color_spec);
+                if (s->desc.width % block_px != 0) {
+                        log_msg(LOG_LEVEL_ERROR, "Width must be a multiple of %d for codec %s.\n",
+                                        block_px, get_codec_name(s->desc.color_spec));
+                        break;
+                }
 
                 ret = VIDCAP_INIT_OK;
         } while(0);
@@ -283,9 +291,32 @@ static void vidcap_testcard2_done(void *state)
 }
 
 /**
+ * Fill the rectangle inside the frame by repeatedly memcpy-ing a
+ * pre-converted pixel-format block (block_size bytes, block_px pixels
+ * wide) across each row. Assumes the rectangle's x is aligned to a
+ * block boundary; partial blocks at the right edge (when w/h has been
+ * clipped) are skipped, so up to block_px-1 pixels of background may
+ * show through on the frame following a bounce off the right wall.
+ */
+static void draw_rect_to_buffer(unsigned char *frame, long linesize,
+                const struct testcard_rect *r,
+                const unsigned char *block, int block_px, int block_size)
+{
+    // Calculate initial pointer location of corner of rectangle (aligned to the block size)
+    unsigned char *ptr = frame + (long) r->y * linesize + (long) (r->x / block_px) * block_size;
+    // Copy in the pixels from the block
+    for (int y = 0; y < r->h; ++y) {
+        for (int x = 0; x < r->w / block_px; ++x) {
+            memcpy(ptr + block_size * x, block, block_size);
+        }
+        ptr += linesize;
+    }
+}
+
+/**
  * Only text banner is rendered in RGBA, other elements (background, squares) are already
- * converted to destination color space. Keep in mind that the regions should be aligned
- * to 6 (v210 block size), won't work for R12L
+ * converted to destination color space. Overlay regions and motion steps are aligned to
+ * the destination pixel format's block size (e.g. 6 pixels for v210, 8 for R12L).
  */
 void * vidcap_testcard2_thread(void *arg)
 {
@@ -295,11 +326,20 @@ void * vidcap_testcard2_thread(void *arg)
         s = (struct testcard_state2 *)arg;
         struct timeval next_frame_time = { 0 };
         srand(time(NULL));
-        int prev_x1 = rand() % ((s->desc.width - 300) / 6) * 6;
-        int prev_y1 = rand() % ((s->desc.height - 300) / 6) * 6;
+        const int block_px    = get_pf_block_pixels(s->desc.color_spec);
+        const int block_size = get_pf_block_bytes(s->desc.color_spec);
+        const int step1       = (RECT1_BASE_STEP_PX + block_px - 1) / block_px * block_px;
+        const int step2       = (RECT2_BASE_STEP_PX + block_px - 1) / block_px * block_px;
+        // Generate the initial position of the rectangles
+        struct testcard_rect rect1 = {
+                .x = rand() % ((s->desc.width  - RECT1_SIZE_PX) / block_px) * block_px,
+                .y = rand() % ((s->desc.height - RECT1_SIZE_PX) / block_px) * block_px,
+        };
         int down1 = rand() % 2, right1 = rand() % 2;
-        int prev_x2 = rand() % ((s->desc.width - 96) / 6) * 6;
-        int prev_y2 = rand() % ((s->desc.height - 96) / 6) * 6;
+        struct testcard_rect rect2 = {
+                .x = rand() % ((s->desc.width  - RECT2_SIZE_PX) / block_px) * block_px,
+                .y = rand() % ((s->desc.height - RECT2_SIZE_PX) / block_px) * block_px,
+        };
         int down2 = rand() % 2, right2 = rand() % 2;
         
         int stat_count_prev = 0;
@@ -330,59 +370,40 @@ void * vidcap_testcard2_thread(void *arg)
         }
 
 #endif
-        /// @note R12l has pixel block size 8 pixels, so the below won't work for that pixfmt
-        unsigned char square_cols[2][48];
-        uint32_t src[6 + MAX_PADDING] = { 0 };
-        testcard_convert_buffer(RGBA, s->desc.color_spec, square_cols[0], (unsigned char *) src, 6, 1);
-        for (int i = 0; i < 6; ++i) src[i] = 0xffff00aa;
-        testcard_convert_buffer(RGBA, s->desc.color_spec, square_cols[1], (unsigned char *) src, 6, 1);
+        // Create colour lookups for rectangles.
+        unsigned char square_cols[2][MAX_PADDING];
+        uint32_t src[PIX_BLOCK_LCM + MAX_PADDING] = { 0 };
+        assert((size_t) block_size <= sizeof square_cols[0]);
+        // Fill the rectangle colour lookups with black and RECT2_FILL_COLOR
+        testcard_convert_buffer(RGBA, s->desc.color_spec, square_cols[0], (unsigned char *) src, block_px, 1);
+        for (int i = 0; i < block_px; ++i) src[i] = RECT2_FILL_COLOR;
+        testcard_convert_buffer(RGBA, s->desc.color_spec, square_cols[1], (unsigned char *) src, block_px, 1);
 
-        ptrdiff_t block_size = 6 * EPS_PLUS_1 * get_bpp(s->desc.color_spec);
+        const size_t data_len = vc_get_datalen(s->desc.width, s->desc.height, s->desc.color_spec);
+        const long   linesize = vc_get_linesize(s->desc.width, s->desc.color_spec);
 
         while(!s->should_exit)
         {
-                size_t data_len = vc_get_datalen(s->desc.width, s->desc.height, s->desc.color_spec);
+                // Each iteration allocates a fresh buffer; ownership is handed
+                // off to s->data and freed by the consumer via vf_data_deleter.
                 unsigned char *tmp = malloc(data_len);
+
+                // Copy in the pre-computed bars background
                 memcpy(tmp, s->bg, data_len);
 
-                struct testcard_rect r;
-                r.w = 300;
-                r.h = 300;
-                r.x = prev_x1 + (right1 ? 1 : -1) * 6;
-                r.y = prev_y1 + (down1 ? 1 : -1) * 6;
-                if(r.x < 0) { right1 = 1; r.x = 0; }
-                if(r.y < 0) { down1 = 1; r.y = 0; }
-                if((unsigned int) r.x + r.w > s->desc.width) { right1 = 0; r.w = s->desc.width - r.x; }
-                if((unsigned int) r.y + r.h > s->desc.height) { down1 = 0; r.h = s->desc.height - r.y; }
-                prev_x1 = r.x;
-                prev_y1 = r.y;
+                // Reset rect size
+                rect1.w = RECT1_SIZE_PX;
+                rect1.h = RECT1_SIZE_PX;
+                testcard_rect_move(&rect1, &right1, &down1, step1, step1,
+                                s->desc.width, s->desc.height);
+                draw_rect_to_buffer(tmp, linesize, &rect1, square_cols[0], block_px, block_size);
 
-                unsigned char *ptr = tmp + r.y * vc_get_linesize(s->desc.width, s->desc.color_spec) + (int) (r.x * EPS_PLUS_1 * get_bpp(s->desc.color_spec));
-                for (int y = 0; y < r.h; ++y) {
-                        for (int x = 0; x < r.w / 6; x += 1) {
-                                memcpy(ptr + block_size * x, square_cols[0], block_size);
-                        }
-                        ptr += vc_get_linesize(s->desc.width, s->desc.color_spec);
-                }
-
-                r.w = 96;
-                r.h = 96;
-                r.x = prev_x2 + (right2 ? 1 : -1) * 12;
-                r.y = prev_y2 + (down2 ? 1 : -1) * 9;
-                if(r.x < 0) { right2 = 1; r.x = 0; }
-                if(r.y < 0) { down2 = 1; r.y = 0; }
-                if((unsigned int) r.x + r.w > s->desc.width)  { right2 = 0; r.w = s->desc.width - r.x; }
-                if((unsigned int) r.y + r.h > s->desc.height)  { down2 = 0; r.h = s->desc.height - r.y; }
-                prev_x2 = r.x;
-                prev_y2 = r.y;
-
-                ptr = tmp + (long) r.y * vc_get_linesize(s->desc.width, s->desc.color_spec) + (long) (r.x * EPS_PLUS_1 * get_bpp(s->desc.color_spec));
-                for (int y = 0; y < r.h; ++y) {
-                        for (int x = 0; x < r.w / 6; x += 1) {
-                                memcpy(ptr + block_size * x, square_cols[1], block_size);
-                        }
-                        ptr += vc_get_linesize(s->desc.width, s->desc.color_spec);
-                }
+                // Reset rect size
+                rect2.w = RECT2_SIZE_PX;
+                rect2.h = RECT2_SIZE_PX;
+                testcard_rect_move(&rect2, &right2, &down2, step2, RECT2_Y_STEP_PX,
+                                s->desc.width, s->desc.height);
+                draw_rect_to_buffer(tmp, linesize, &rect2, square_cols[1], block_px, block_size);
 
 #ifdef HAVE_LIBSDL_TTF
                 memset(banner, 0xFF, 4L * s->desc.width * BANNER_HEIGHT);
@@ -408,7 +429,7 @@ void * vidcap_testcard2_thread(void *arg)
                                 d++;
                         }
                 }
-                testcard_convert_buffer(RGBA, s->desc.color_spec, tmp + (s->desc.height - BANNER_MARGIN_BOTTOM - BANNER_HEIGHT) * vc_get_linesize(s->desc.width, s->desc.color_spec), (unsigned char *) banner, s->desc.width, BANNER_HEIGHT);
+                testcard_convert_buffer(RGBA, s->desc.color_spec, tmp + (s->desc.height - BANNER_MARGIN_BOTTOM - BANNER_HEIGHT) * linesize, (unsigned char *) banner, s->desc.width, BANNER_HEIGHT);
                 SDL_FreeSurface(text);
 #endif
 

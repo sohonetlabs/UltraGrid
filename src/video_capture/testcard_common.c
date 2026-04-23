@@ -182,3 +182,36 @@ bool testcard_has_conversion(codec_t c)
                 testcard_conv_handled_internally(c);
 }
 
+/**
+ * Advance the rectangle by one frame's step and bounce off the frame
+ * boundary. The rectangle carries its x/y position across frames; the
+ * caller sets w/h to the intended full size on entry, and the direction
+ * flags are flipped in place when an edge is hit. If the rect would
+ * extend past max_w or max_h, its w/h is clipped on exit so the caller
+ * can fill without overrunning.
+ */
+void testcard_rect_move(struct testcard_rect *r, int *right, int *down,
+                int x_step, int y_step,
+                unsigned int max_w, unsigned int max_h)
+{
+        r->x += (*right ? 1 : -1) * x_step;
+        r->y += (*down  ? 1 : -1) * y_step;
+        if (r->x < 0) {
+                *right = 1;
+                r->x = 0;
+        }
+        if (r->y < 0) {
+                *down = 1;
+                r->y = 0;
+        }
+
+        if ((unsigned int) r->x + r->w > max_w) {
+                *right = 0;
+                r->w = max_w - r->x;
+        }
+        if ((unsigned int) r->y + r->h > max_h) {
+                *down = 0;
+                r->h = max_h - r->y;
+        }
+}
+
