@@ -538,7 +538,7 @@ void PlayoutBufferStats::processStats(const std::unique_ptr<rtp_packet>& packet)
     auto dist = static_cast<uint16_t>(packet->seq - this->lastReportSequence);
     if((dist >= this->statsInterval * 2) && (dist < uint16MaxHalf)) {
         // Sum up only up to stats interval to be able to catch out-of-order packets.
-        auto reportSeqUntil = (uint16_t)((floor((double)packet->seq / this->statsInterval) - 1) * this->statsInterval);
+        auto reportSeqUntil = (uint16_t)((packet->seq / this->statsInterval * this->statsInterval) - this->statsInterval);
         for(uint16_t i = this->lastReportSequence; i != reportSeqUntil; i += NUMBER_WORD_BITS) {
             this->expectedPackets += NUMBER_WORD_BITS;
             this->receivedPackets += __builtin_popcountll(this->packets[i / NUMBER_WORD_BITS]);
