@@ -130,8 +130,11 @@ static ssize_t write_all(fd_t fd, const void *buf, size_t count)
     size_t rest = count;
     ssize_t w = 0;
 
-    while (rest > 0 && ((fd > 2 && (w = send(fd, p, rest, MSG_NOSIGNAL)) > 0) ||
-                            (w = write(fd, p, rest)) > 0)) {
+    while (rest > 0) {
+        w = fd > 2 ? send(fd, p, rest, MSG_NOSIGNAL) : write(fd, p, rest);
+        if (w <= 0) {
+            break;
+        }
         p += w;
         rest -= w;
     }
