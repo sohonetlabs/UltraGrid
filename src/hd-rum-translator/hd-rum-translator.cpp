@@ -68,12 +68,14 @@
 #include "module.h"
 #include "rang.hpp"
 #include "rtp/net_udp.h"
+#include "rtp/playout_buffer.hpp"
 #include "utils/misc.h" // format_in_si_units, unit_evaluate
 #include "tv.h"
 #include "utils/net.h"
 
 #include <cinttypes>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -813,6 +815,25 @@ static bool sockaddr_equal(struct sockaddr *a, struct sockaddr *b){
         }
 }
 
+constexpr long RTP_FIXED_HDR_LEN = 12;
+
+static void update_packet_stats(map<uint32_t, PlayoutBufferStats>& stats,
+                const unique_ptr<rtp_packet>& pkt, const char *buf, long size){
+        if(size < RTP_FIXED_HDR_LEN || ((unsigned char) buf[0] >> 6) != 2)
+                return;
+
+        uint16_t seq;
+        uint32_t ssrc;
+        memcpy(&seq, buf + 2, sizeof seq);
+        memcpy(&ssrc, buf + 8, sizeof ssrc);
+        ssrc = ntohl(ssrc);
+
+        // processStats reads only seq and ssrc
+        pkt->seq = ntohs(seq);
+        pkt->ssrc = ssrc;
+        stats[ssrc].processStats(pkt);
+}
+
 #define EXIT(retval) { hd_rum_translator_deinit(&state); if (sock_in != nullptr) udp_exit(sock_in); common_cleanup(init); return retval; }
 int main(int argc, char **argv)
 {
@@ -959,6 +980,9 @@ int main(int argc, char **argv)
 
     std::vector<Conf_participant> participants;
 
+    std::map<uint32_t, PlayoutBufferStats> packet_stats;
+    auto stats_pkt = std::make_unique<rtp_packet>();
+
     /* main loop */
     while (!should_exit) {
         while (state.qtail->next != state.qhead && !should_exit) {
@@ -1034,6 +1058,7 @@ int main(int argc, char **argv)
             }
 
             received_data += state.qtail->size;
+            update_packet_stats(packet_stats, stats_pkt, state.qtail->buf, state.qtail->size);
 
             state.qtail = state.qtail->next;
 
