@@ -54,6 +54,7 @@
 #include "compat/platform_time.h"
 #include "messaging.h"
 #include "module.h"
+#include "utils/frame_interval_stats.hpp"
 #include "utils/synchronized_queue.h"
 #include "utils/thread.h"
 #include "utils/vf_split.h"
@@ -106,7 +107,17 @@ struct compress_state {
         struct compress_state_real *ptr; ///< pointer to real compress state
         synchronized_queue<shared_ptr<video_frame>, 1> queue;
         bool poisoned = false;
+        FrameIntervalStats encoder_in_stats{"Video encoder in stats"};
+        FrameIntervalStats encoder_out_stats{"Video encoder out stats"};
 };
+
+static void push_compressed(struct compress_state *proxy, shared_ptr<video_frame> frame)
+{
+        if (frame) {
+                proxy->encoder_out_stats.record(frame->fps);
+        }
+        proxy->queue.push(std::move(frame));
+}
 
 static shared_ptr<video_frame> compress_frame_tiles(struct compress_state *proxy,
                 shared_ptr<video_frame> frame);
@@ -337,6 +348,10 @@ void compress_frame(struct compress_state *proxy, shared_ptr<video_frame> frame)
 
         uint64_t t0 = time_since_epoch_in_ms();
 
+        if (frame) {
+                proxy->encoder_in_stats.record(frame->fps);
+        }
+
         struct msg_change_compress_data *msg = NULL;
         while ((msg = (struct msg_change_compress_data *) check_message(&proxy->mod))) {
                 compress_process_message(proxy, msg);
@@ -399,7 +414,7 @@ void compress_frame(struct compress_state *proxy, shared_ptr<video_frame> frame)
                 sync_api_frame->compress_start = t0;
                 sync_api_frame->compress_end = time_since_epoch_in_ms();
 
-                proxy->queue.push(sync_api_frame);
+                push_compressed(proxy, sync_api_frame);
         }
 }
 
@@ -563,7 +578,7 @@ void compress_state_real::async_tile_consumer(struct compress_state *s)
                         continue;
 
                 if (!discard_frames) {
-                        s->queue.push(vf_merge_tiles(compressed_tiles));
+                        push_compressed(s, vf_merge_tiles(compressed_tiles));
                 }
                 //If frames are not numbered they always have seq = 0
                 if(expected_seq > 0) expected_seq++;
@@ -576,7 +591,7 @@ void compress_state_real::async_consumer(struct compress_state *s)
         while (true) {
                 auto frame = funcs->compress_frame_async_pop_func(state[0]);
                 if (!discard_frames) {
-                        s->queue.push(frame);
+                        push_compressed(s, frame);
 
                 }
                 if (!frame) {

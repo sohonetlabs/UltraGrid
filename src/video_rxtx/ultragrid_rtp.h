@@ -38,6 +38,7 @@
 #ifndef VIDEO_RXTX_ULTRAGRID_RTP_H_
 #define VIDEO_RXTX_ULTRAGRID_RTP_H_
 
+#include "utils/frame_interval_stats.hpp"
 #include "video_rxtx.h"
 #include "video_rxtx/rtp.h"
 
@@ -93,6 +94,8 @@ private:
         long long int m_nano_per_frame_actual_cumul = 0;
         long long int m_nano_per_frame_expected_cumul = 0;
         long long int m_compress_millis_cumul = 0;
+
+        FrameIntervalStats m_send_stats{"Video send stats"};
 };
 
 #endif // VIDEO_RXTX_ULTRAGRID_RTP_H_
