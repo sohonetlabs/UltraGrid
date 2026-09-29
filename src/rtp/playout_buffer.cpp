@@ -220,7 +220,7 @@ BufferFrame::BufferFrame(unsigned int rtpTimestamp, long long playoutDelayUs) : 
     this->packets.reserve(20000);
 
     // Set the arrival time as now
-    this->arrivalTime = std::chrono::high_resolution_clock::now();
+    this->arrivalTime = std::chrono::steady_clock::now();
     // Set the playout time as the arrival time plus the playout delay
     this->playoutTime = this->arrivalTime + std::chrono::nanoseconds(playoutDelayUs);
     // Set the deletion time as the playout time plus the playout delay again
@@ -317,7 +317,7 @@ bool BufferFrame::isComplete() {
  *        checking if the the playout time has passed
 */
 bool BufferFrame::isReady() {
-    return std::chrono::high_resolution_clock::now() > this->playoutTime;
+    return std::chrono::steady_clock::now() > this->playoutTime;
 }
 
 /**
@@ -428,7 +428,7 @@ PlayoutBufferStats::PlayoutBufferStats() {
     this->receivedPacketsTotal = 0;
     this->expectedPacketsTotal = 0;
 
-    this->lastDisplayTimestamp = std::chrono::high_resolution_clock::now();
+    this->lastDisplayTimestamp = std::chrono::steady_clock::now();
     this->outOfOrderPackets = 0;
     this->maxOutOfOrderPacketsDist = 0;
     this->duplicatePackets = 0;
@@ -551,7 +551,7 @@ void PlayoutBufferStats::processStats(const std::unique_ptr<rtp_packet>& packet)
     }
 
     // Print out the report if enough time has passed. Reset the variables
-    std::chrono::high_resolution_clock::time_point now = std::chrono::high_resolution_clock::now();
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     unsigned int secondsSinceReport = std::chrono::duration_cast<std::chrono::seconds>(now - this->lastDisplayTimestamp).count();
     if(secondsSinceReport > 5 && this->expectedPackets > 0) {
         // Calculate packet loss percentage

@@ -75,7 +75,7 @@ private:
     unsigned char packetType;                                    // The last seen RTP payload type for this participant
     std::unique_ptr<PlayoutBuffer> playoutBuffer;                // Each participant has their own playout buffer
     struct tfrc* tfrcState;
-    std::chrono::high_resolution_clock::time_point creationTime; // The time this participant was made
+    std::chrono::system_clock::time_point creationTime; // The time this participant was made
 };
 
 template<typename State>
