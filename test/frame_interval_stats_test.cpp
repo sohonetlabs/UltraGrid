@@ -78,12 +78,12 @@ frame_interval_stats_test::test_threshold_boundaries()
         FrameIntervalStats summary{"Test stats"};
         summary.set_fps(25);
         summary.record(T0);
-        summary.record(T0 + microseconds(60000));
+        summary.record(T0 + microseconds(50000));
         summary.record(T0 + microseconds(80000));
         CPPUNIT_ASSERT_EQUAL(uint64_t{0}, summary.get_long_intervals());
         CPPUNIT_ASSERT_EQUAL(uint64_t{0}, summary.get_short_intervals());
 
-        summary.record(T0 + microseconds(140001));
+        summary.record(T0 + microseconds(130001));
         summary.record(T0 + microseconds(160000));
         CPPUNIT_ASSERT_EQUAL(uint64_t{1}, summary.get_long_intervals());
         CPPUNIT_ASSERT_EQUAL(uint64_t{1}, summary.get_short_intervals());

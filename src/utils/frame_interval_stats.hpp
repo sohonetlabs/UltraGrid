@@ -24,8 +24,8 @@ class FrameIntervalStats {
 public:
         using clock = std::chrono::steady_clock;
 
-        static constexpr double LONG_INTERVAL_RATIO = 1.5;
-        static constexpr double SHORT_INTERVAL_RATIO = 0.5;
+        static constexpr double LONG_INTERVAL_RATIO = 1.25;
+        static constexpr double SHORT_INTERVAL_RATIO = 0.75;
         static constexpr std::chrono::seconds REPORT_INTERVAL{10};
 
         explicit FrameIntervalStats(std::string label) : label(std::move(label)) {}
