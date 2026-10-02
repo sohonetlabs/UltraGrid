@@ -6,7 +6,7 @@
 template<typename State>
 Participant<State>::Participant(unsigned int ssrc, volatile int *delayMs) : ssrc(ssrc) {
     // Mark the time this object was created as now
-    this->creationTime = std::chrono::high_resolution_clock::now();
+    this->creationTime = std::chrono::system_clock::now();
 
     // Create a playout buffer for the participant
     this->playoutBuffer = std::make_unique<PlayoutBuffer>(delayMs);

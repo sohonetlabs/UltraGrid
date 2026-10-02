@@ -155,14 +155,14 @@ public:
     PacketTiming(size_t limit, MediaType mediaType) : limit(limit), mediaType(mediaType) {
         this->values = std::queue<long long>();
         this->total = 0;
-        this->reportTiming = std::chrono::high_resolution_clock::now();
+        this->reportTiming = std::chrono::steady_clock::now();
     };
 
     /**
      * @brief A wrapper function for the start recording of the packet timing.
      */
     void start() {
-        this->begin = std::chrono::high_resolution_clock::now();
+        this->begin = std::chrono::steady_clock::now();
     }
 
     /**
@@ -170,7 +170,7 @@ public:
      *        of a moving average.
      */
     void measure() {
-        std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
         long long packetTiming = std::chrono::duration_cast<std::chrono::milliseconds>(end - this->begin).count();
 
         // If our queue has surpassed its limit, then remove an element
@@ -204,7 +204,7 @@ public:
      * @param packetCount
      */
     void report(size_t packetCount, uint32_t frameTarget = 0) {
-        std::chrono::high_resolution_clock::time_point now = std::chrono::high_resolution_clock::now();
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
         long long timeSinceReport = std::chrono::duration_cast<std::chrono::seconds>(now - this->reportTiming).count();
 
         if(timeSinceReport > 10) {
@@ -224,8 +224,8 @@ public:
         }
     }
 private:
-    std::chrono::high_resolution_clock::time_point reportTiming;
-    std::chrono::high_resolution_clock::time_point begin;
+    std::chrono::steady_clock::time_point reportTiming;
+    std::chrono::steady_clock::time_point begin;
     std::queue<long long> values;
     size_t limit;
     long long total;
@@ -1251,7 +1251,7 @@ void tx_send_packets(struct tx *tx, struct rtp *rtpSession, const std::vector<in
     int multCount = tx->fec_scheme == FEC_MULT ? tx->mult_count : 1;
 
     // Get the timing from the beginning, so we can calculate if we're on target or not.
-    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     // Keep track of the total time spent pacing
     std::chrono::duration idleDuration = std::chrono::nanoseconds(0);
 
@@ -1315,19 +1315,19 @@ void tx_send_packets(struct tx *tx, struct rtp *rtpSession, const std::vector<in
         // we should wait until we're at our expected timing.
         if(packetPace) {
             // Get the time
-            std::chrono::high_resolution_clock::time_point sentTimePoint = std::chrono::high_resolution_clock::now();
+            std::chrono::steady_clock::time_point sentTimePoint = std::chrono::steady_clock::now();
             // Calculate where we should be according to our target
             std::chrono::duration targetDuration = std::chrono::nanoseconds(packetDurationTarget) * (loopIndex + 1);
-            std::chrono::high_resolution_clock::time_point target = start + targetDuration;
+            std::chrono::steady_clock::time_point target = start + targetDuration;
             // Keep track of if we had to wait at all
             bool waiting = false;
             // Loop until we're on target
-            while(std::chrono::high_resolution_clock::now() < target) {
+            while(std::chrono::steady_clock::now() < target) {
                 waiting = true;
             }
             // Add the duration spent waiting to the idle timer
             if(waiting) {
-                idleDuration += (std::chrono::high_resolution_clock::now() - sentTimePoint);
+                idleDuration += (std::chrono::steady_clock::now() - sentTimePoint);
             }
         }
 

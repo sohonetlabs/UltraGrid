@@ -48,7 +48,7 @@ private:
     std::atomic<long long> receivedPacketsTotal;         // The total cumulative amount of received packets
     std::atomic<long long> expectedPacketsTotal;         // The total cumulative amount of expected packets
     
-    std::chrono::high_resolution_clock::time_point lastDisplayTimestamp;      // The last seen display timestamp
+    std::chrono::steady_clock::time_point lastDisplayTimestamp;      // The last seen display timestamp
     std::atomic<unsigned int> outOfOrderPackets;         // The number of out or order packets seen
     std::atomic<unsigned int> maxOutOfOrderPacketsDist;  // The maximum distribution of the out of order packets
     std::atomic<unsigned int> duplicatePackets;          // The number of duplicate packets found
@@ -94,9 +94,9 @@ private:
                                                                  // of the packets assigned to it (based on the RTP timestamp)
 
     unsigned int rtpTimestamp;                                   // The RTP timestamp of the frame
-    std::chrono::high_resolution_clock::time_point arrivalTime;  // Arrival time of the first packet in the frame
-    std::chrono::high_resolution_clock::time_point playoutTime;  // The expected playout time of the frame
-    std::chrono::high_resolution_clock::time_point deletionTime; // The deletion time of the frame
+    std::chrono::steady_clock::time_point arrivalTime;  // Arrival time of the first packet in the frame
+    std::chrono::steady_clock::time_point playoutTime;  // The expected playout time of the frame
+    std::chrono::steady_clock::time_point deletionTime; // The deletion time of the frame
     
     bool decoded      = false; // If the frame has been decoded or not.
     bool mBit         = false; // If the 'm' bit has been set on the frame (if the last packet has arrived or not).

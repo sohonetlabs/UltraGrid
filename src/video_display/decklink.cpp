@@ -60,6 +60,7 @@
 #include "rtp/audio_decoders.h"
 #include "tv.h"
 #include "ug_runtime_error.hpp"
+#include "utils/frame_interval_stats.hpp"
 #include "utils/misc.h"
 #include "utils/text.h" // is_prefix_of
 #include "video.h"
@@ -323,7 +324,7 @@ struct device_state {
 
 struct state_decklink {
         uint32_t            magic = DECKLINK_MAGIC;
-        chrono::high_resolution_clock::time_point t0 = chrono::high_resolution_clock::now();
+        chrono::steady_clock::time_point t0 = chrono::steady_clock::now();
 
         vector<struct device_state> state;
 
@@ -361,6 +362,7 @@ struct state_decklink {
         bool                keep_device_defaults = false;
 
         AudioDriftFixer audio_drift_fixer{};
+        FrameIntervalStats video_summary{"Decklink video stats"};
  };
 
 static void show_help(bool full);
@@ -626,6 +628,8 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
                 }
         }
 
+        s->video_summary.record();
+
         for (int j = 0; j < s->devices_cnt; ++j) {
                 IDeckLinkMutableVideoFrame *deckLinkFrame =
                         (*((vector<IDeckLinkMutableVideoFrame *> *) frame->callbacks.dispose_udata))[j];
@@ -648,7 +652,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
 
         frame->callbacks.dispose(frame);
 
-        auto now = chrono::high_resolution_clock::now();
+        auto now = chrono::steady_clock::now();
         if (chrono::duration_cast<chrono::seconds>(now - s->t0).count() > 5) {
                 LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << s->state.at(0).delegate->frames_late << " frames late, "
                                 << s->state.at(0).delegate->frames_dropped << " dropped, "
@@ -741,6 +745,7 @@ display_decklink_reconfigure_video(void *state, struct video_desc desc)
         assert(s->magic == DECKLINK_MAGIC);
         
         s->vid_desc = desc;
+        s->video_summary.set_fps(desc.fps);
 
         if (desc.color_spec == R10k && get_commandline_param(R10K_FULL_OPT) == nullptr) {
                 log_msg(LOG_LEVEL_WARNING, MOD_NAME "Using limited range R10k as specified by BMD, use '--param "
