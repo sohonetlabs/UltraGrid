@@ -641,14 +641,48 @@ static bool fec_valid(rs* rsState, FecChannel* fecChannel) {
 }
 
 /**
+ * @brief Copies the recovered audio data of a channel out of its FEC segments into the frame, stripping the
+ *        length word and audio header that the encoder prepended to the channel data.
+ */
+static void audio_fec_copy_channel(FecChannel* fecChannel, audio_frame2 &frame, size_t channel) {
+    // If we have reached this point then the data in the FEC Channels segments block is the correct data!
+    // Get the first 4 bytes in the buffer, as they are the size of the original data length + header
+    // (so remove the audio header length)
+    uint32_t originalSize = 0;
+    memcpy(&originalSize, (*fecChannel)[0], sizeof originalSize);
+    uint32_t offset = 0;
+    uint32_t initialBlockOffset = (sizeof(uint32_t) + sizeof(audio_payload_hdr_t));
+    // The original size includes the audio header, so lets remove that
+    originalSize -= sizeof(audio_payload_hdr_t);
+    // Resize the frame so we know it's the correct size
+    frame.resize(channel, originalSize);
+    // The first part of the data needs the audio header and data length removed from it
+    // (audio header is 5 32bit ints. data length is 1 32bit int).
+    frame.replace(channel, offset, (*fecChannel)[0] + initialBlockOffset,
+                  fecChannel->getSegmentSize() - initialBlockOffset);
+    // Reduce the original size by what we have written into the frame
+    originalSize -= fecChannel->getSegmentSize() - initialBlockOffset;
+    offset += fecChannel->getSegmentSize() - initialBlockOffset;
+    // The payload may end before the last data segment, with the remaining segments being padding
+    for (size_t i = 1; i < fecChannel->getKBlocks() && originalSize > 0; i++) {
+        uint32_t len = std::min(originalSize, fecChannel->getSegmentSize());
+        frame.replace(channel, offset, (*fecChannel)[i], len);
+        originalSize -= len;
+        offset += len;
+    }
+}
+
+/**
  * @brief This will decode the data collected from the transmission and decode the data into the given audio frame.
  *        The function is optimised not to bother attempting a FEC decode if all of the required data has been
- *        received.
+ *        received. Channels that cannot be reconstructed are replaced with silence so that the remaining channels
+ *        of the frame are still played.
  * @param s The packet buffer data
  * @param fecChannelData A list of channel data received from the transmission
  * @param frame The audio frame to place the decoded data into
- * @return bool A boolean indicating whether decoding the channel data was possible or not. False is returned when one
- *              of the channels has not received enough data to be reconstructed.
+ * @return bool A boolean indicating whether decoding the channel data was possible or not. False is returned when no
+ *              channel has received enough data to be reconstructed, or when a channel is unrecoverable and the
+ *              codec is not PCM (silence cannot be synthesised for compressed audio).
  */
 static bool audio_fec_decode_channels(struct pbuf_audio_data *s, vector<std::unique_ptr<FecChannel>>& fecChannelData, audio_frame2 &frame) {
     // Check that there is data to process
@@ -657,33 +691,20 @@ static bool audio_fec_decode_channels(struct pbuf_audio_data *s, vector<std::uni
         return false;
     }
 
-    if(fecChannelData[0] == nullptr) {
-        LOG(LOG_LEVEL_ERROR) << "Unable to validate FEC settings. Lost all data from channel 1.\n";
-        return false;
-    }
-
-    // Create the decoder if it does not exist
     struct state_audio_decoder *decoder = s->decoder;
 
-    if(decoder->rs_state == nullptr || !fec_valid(decoder->rs_state, fecChannelData[0].get())) {
-        // Use the data from the first instance. It should all be the same. Don't worry about the
-        // multiplication as it's not relevant when decoding
-        decoder->rs_state = new rs(fecChannelData[0]->getKBlocks(), fecChannelData[0]->getMBlocks() + fecChannelData[0]->getKBlocks(), 1);
-    }
-    audio_desc audioDesc{};
-
-    // Iterate through each channel and decode the FEC output
+    vector<FecRecoveryState> states(fecChannelData.size(), FecRecoveryState::FEC_UNRECOVERABLE);
+    int reference = -1;
+    bool anyMissing = false;
+    bool anyUnrecoverable = false;
     for(size_t channel = 0; channel < fecChannelData.size(); channel++) {
-        std::unique_ptr<FecChannel> fecChannel = std::move(fecChannelData[channel]);
-        if (fecChannel == nullptr) {
+        if (fecChannelData[channel] == nullptr) {
             LOG(LOG_LEVEL_ERROR) << "Lost all data from channel " << channel + 1 << ". Unable to recover data.\n";
-            decoder->summary.incrementNoChannelDataFrames();
-            return false;
+            anyMissing = true;
+            continue;
         }
-
-        // Organise the data ready for recovery
-        FecRecoveryState fecState = fecChannel->generateRecovery();
-        switch (fecState) {
+        states[channel] = fecChannelData[channel]->generateRecovery();
+        switch (states[channel]) {
             case FecRecoveryState::FEC_COMPLETE: {
                 LOG(LOG_LEVEL_DEBUG) << MOD_NAME << "Received all of the data for the channel: " << channel + 1 << "\n";
                 break;
@@ -692,75 +713,94 @@ static bool audio_fec_decode_channels(struct pbuf_audio_data *s, vector<std::uni
                 LOG(LOG_LEVEL_ERROR) << MOD_NAME
                                      << "We did not receive enough segments (k segments) to be able to reconstruct the data for channel: "
                                      << channel + 1 << "\n";
-                decoder->summary.incrementUnrecoverableFrames();
-                return false;
+                anyUnrecoverable = true;
+                break;
             }
             case FecRecoveryState::FEC_RECOVERABLE: {
                 LOG(LOG_LEVEL_VERBOSE) << MOD_NAME
                                        << "Segments were lost, but enough were received to reconstruct the data for channel: "
                                        << channel + 1 << "\n";
-                decoder->rs_state->decodeAudio(fecChannel.get());
-                // Once the recovery data has been passed into the FEC decoder, then organise the the data so that it is in order.
-                fecChannel->recover();
-                decoder->summary.incrementRecoverableFrames();
                 break;
             }
         }
-
-        // Check whether or not the audio data that has been received matches the frames settings
-        if (!audioDesc) {
-            uint32_t audioHdrTuple = 0;
-            uint32_t audioTag = 0;
-
-            // Extract the audio tag, sample rate, and BPS from the audio header attached to the front of
-            // the data. Ensure to flip the data before inserting it into the
-            memcpy(&audioHdrTuple, fecChannel->getSegment(0) + (4 * sizeof(uint32_t)), sizeof(uint32_t));
-            memcpy(&audioTag, fecChannel->getSegment(0) + (5 * sizeof(uint32_t)), sizeof(uint32_t));
-            audioHdrTuple = ntohl(audioHdrTuple);
-            audioTag = ntohl(audioTag);
-
-            audioDesc.bps = (audioHdrTuple >> 26) / 8;
-            audioDesc.sample_rate = audioHdrTuple & 0x07FFFFFFU;
-            audioDesc.ch_count = fecChannelData.size();
-            audioDesc.codec = get_audio_codec_to_tag(audioTag);
-            if (!audioDesc.codec) {
-                auto flags = std::clog.flags();
-                LOG(LOG_LEVEL_ERROR) << MOD_NAME << "Wrong AudioTag 0x" << hex << audioTag << "\n";
-                std::clog.setf(flags);
-            }
-
-            if (!audio_decoder_reconfigure(decoder, s, frame, audioDesc.ch_count, audioDesc.bps, audioDesc.sample_rate,
-                                           audioTag)) {
-                return FALSE;
-            }
+        if (reference < 0 && states[channel] != FecRecoveryState::FEC_UNRECOVERABLE) {
+            reference = channel;
         }
+    }
 
-        // If we have reached this point then the data in the FEC Channels segments block is the correct data!
-        // Get the first 4 bytes in the buffer, as they are the size of the original data length + header (so remove the audio header length)
-        uint32_t originalSize = *((uint32_t *) (*fecChannel)[0]);
-        uint32_t offset = 0;
-        uint32_t initialBlockOffset = (sizeof(uint32_t) + sizeof(audio_payload_hdr_t));
-        // The original size includes the audio header, so lets remove that
-        originalSize -= sizeof(audio_payload_hdr_t);
-        // Resize the frame so we know it's the correct size
-        frame.resize(channel, originalSize);
-        // The first part of the data needs the audio header and data length removed from it (audio header is 5 32bit ints. data length is 1 32bit int).
-        frame.replace(channel, offset, (*fecChannel)[0] + initialBlockOffset,
-                      fecChannel->getSegmentSize() - initialBlockOffset);
-        // Reduce the original size by what we have written into the frame
-        originalSize -= fecChannel->getSegmentSize() - initialBlockOffset;
-        offset += fecChannel->getSegmentSize() - initialBlockOffset;
-        for (size_t i = 1; i < fecChannel->getKBlocks(); i++) {
-            if ((int) originalSize - (int) fecChannel->getSegmentSize() < 0) {
-                frame.replace(channel, offset, (*fecChannel)[i], originalSize);
-            } else {
-                frame.replace(channel, offset, (*fecChannel)[i], fecChannel->getSegmentSize());
-                originalSize -= fecChannel->getSegmentSize();
-                offset += fecChannel->getSegmentSize();
-            }
+    if (anyMissing) {
+        decoder->summary.incrementNoChannelDataFrames();
+    }
+    if (anyUnrecoverable) {
+        decoder->summary.incrementUnrecoverableFrames();
+    }
+    if (reference < 0) {
+        LOG(LOG_LEVEL_ERROR) << MOD_NAME << "No channel in the frame can be reconstructed.\n";
+        return false;
+    }
+
+    // Create the decoder if it does not exist. The FEC settings are the same for every channel, so any
+    // channel that can be decoded is a valid source. Don't worry about the multiplication as it's not
+    // relevant when decoding.
+    FecChannel* referenceChannel = fecChannelData[reference].get();
+    if(decoder->rs_state == nullptr || !fec_valid(decoder->rs_state, referenceChannel)) {
+        decoder->rs_state = new rs(referenceChannel->getKBlocks(), referenceChannel->getMBlocks() + referenceChannel->getKBlocks(), 1);
+    }
+
+    for(size_t channel = 0; channel < fecChannelData.size(); channel++) {
+        if (states[channel] == FecRecoveryState::FEC_RECOVERABLE) {
+            decoder->rs_state->decodeAudio(fecChannelData[channel].get());
+            // Once the recovery data has been passed into the FEC decoder, then organise the data so that it is in order.
+            fecChannelData[channel]->recover();
+            decoder->summary.incrementRecoverableFrames();
         }
-        // Now we've placed the data into the audio frame, we can delete the channel. Simply let the channel destroy
-        // itself at the end of the loop
+    }
+
+    // Extract the data length, audio tag, sample rate, and BPS from the audio header attached to the
+    // front of the reference channel's data. Ensure to flip the data before inserting it into the
+    // audio description. Every channel of a frame carries the same amount of data, so the length also
+    // sizes the silence substituted for a lost channel.
+    uint32_t audioLen = 0;
+    uint32_t audioHdrTuple = 0;
+    uint32_t audioTag = 0;
+    memcpy(&audioLen, referenceChannel->getSegment(0), sizeof(uint32_t));
+    memcpy(&audioHdrTuple, referenceChannel->getSegment(0) + (4 * sizeof(uint32_t)), sizeof(uint32_t));
+    memcpy(&audioTag, referenceChannel->getSegment(0) + (5 * sizeof(uint32_t)), sizeof(uint32_t));
+    audioHdrTuple = ntohl(audioHdrTuple);
+    audioTag = ntohl(audioTag);
+    audioLen -= sizeof(audio_payload_hdr_t);
+
+    audio_desc audioDesc{};
+    audioDesc.bps = (audioHdrTuple >> 26) / 8;
+    audioDesc.sample_rate = audioHdrTuple & 0x07FFFFFFU;
+    audioDesc.ch_count = fecChannelData.size();
+    audioDesc.codec = get_audio_codec_to_tag(audioTag);
+    if (!audioDesc.codec) {
+        auto flags = std::clog.flags();
+        LOG(LOG_LEVEL_ERROR) << MOD_NAME << "Wrong AudioTag 0x" << hex << audioTag << "\n";
+        std::clog.setf(flags);
+    }
+
+    // Zeroed samples are only silence for PCM
+    if ((anyMissing || anyUnrecoverable) && audioDesc.codec != AC_PCM) {
+        LOG(LOG_LEVEL_ERROR) << MOD_NAME << "Unable to substitute silence for a lost channel with a non-PCM codec.\n";
+        return false;
+    }
+
+    if (!audio_decoder_reconfigure(decoder, s, frame, audioDesc.ch_count, audioDesc.bps, audioDesc.sample_rate,
+                                   audioTag)) {
+        return FALSE;
+    }
+
+    for(size_t channel = 0; channel < fecChannelData.size(); channel++) {
+        if (fecChannelData[channel] != nullptr && states[channel] != FecRecoveryState::FEC_UNRECOVERABLE) {
+            audio_fec_copy_channel(fecChannelData[channel].get(), frame, channel);
+        } else {
+            LOG(LOG_LEVEL_WARNING) << MOD_NAME << "Substituting silence for channel: " << channel + 1 << "\n";
+            frame.resize(channel, audioLen);
+            memset(frame.get_data(channel), 0, audioLen);
+        }
+        // Now we've placed the data into the audio frame, we can delete the channel.
         fecChannelData[channel] = nullptr;
     }
     return true;
