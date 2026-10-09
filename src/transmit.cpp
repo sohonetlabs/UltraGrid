@@ -91,6 +91,7 @@
 #include <chrono>
 #include <functional>
 #include <iostream>
+#include <thread>
 #include <utility>
 #include <string>
 #include <vector>
@@ -267,7 +268,8 @@ struct tx {
         PacketTiming audioTiming;
 
         uint64_t videoFrameTarget;
-        
+        int64_t audioFrameTarget;
+
         long long int bitrate;
         struct rate_limit_dyn dyn_rate_limit_state;
 		
@@ -346,6 +348,10 @@ ADD_TO_PARAM("video-frame-target", "* video-frame-target=<Target in ms>\n"
              "  The target for sending out all packets (for shaping purposes) in ms (milliseconds)."
              " Set to zero to use 66% of the duration of the frame.");
 
+ADD_TO_PARAM("audio-frame-target", "* audio-frame-target=<Target in ms>\n"
+             "  The target for sending out all audio FEC packets of a frame in ms (milliseconds)."
+             " -1 (the default) uses 50% of the duration of the frame, 0 sends unpaced.");
+
 struct tx *tx_init(struct module *parent, unsigned mtu, enum tx_media_type media_type,
                 const char *fec, const char *encryption, long long int bitrate)
 {
@@ -406,6 +412,13 @@ struct tx *tx_init(struct module *parent, unsigned mtu, enum tx_media_type media
         else {
             // Otherwise set to a default (zero will use 66% of the duration of the frame)
             tx->videoFrameTarget = 0;
+        }
+
+        tx->audioFrameTarget = -1;
+        const char* audioFrameTarget = get_commandline_param("audio-frame-target");
+        if(audioFrameTarget) {
+            int target = std::stoi(audioFrameTarget);
+            tx->audioFrameTarget = static_cast<int64_t>(target) * 1000 * 1000;
         }
 
         if (encryption) {
@@ -1699,6 +1712,30 @@ void audio_tx_send_channel_segments(struct tx* tx, struct rtp *rtp_session, cons
 }
 
 /**
+ * @brief The time over which the packets of an audio frame are spread, in nanoseconds, or zero for unpaced.
+ *        A negative setting means half the frame duration.
+ */
+static uint64_t audio_frame_target(struct tx* tx, const audio_frame2 * buffer) {
+    if (tx->audioFrameTarget < 0) {
+        return static_cast<uint64_t>(buffer->get_duration() * NANOSECOND) / 2;
+    }
+    return tx->audioFrameTarget;
+}
+
+/**
+ * @brief Sleeps until shortly before the target and spins for the remainder, since the scheduler's wake-up
+ *        granularity is coarse relative to the gap between paced audio packets.
+ */
+static void wait_until_packet_target(std::chrono::steady_clock::time_point target) {
+    constexpr std::chrono::microseconds spinWindow(200);
+    if (target - std::chrono::steady_clock::now() > spinWindow) {
+        std::this_thread::sleep_until(target - spinWindow);
+    }
+    while (std::chrono::steady_clock::now() < target) {
+    }
+}
+
+/**
  * @brief Sends the FEC segments of an audio frame interleaved across the channels: the first packet of every channel,
  *        then the second packet of every channel, and so on through the parity packets. Consecutive packets on the
  *        wire therefore belong to different channels, so a burst of loss is spread thinly over all of the channels
@@ -1730,6 +1767,11 @@ void audio_fec_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame
     // that is applied when RS FEC is in use
     unsigned int segmentCount = totalPackets * fecMultFactor;
 
+    uint64_t frameTarget = audio_frame_target(tx, buffer);
+    std::chrono::nanoseconds packetDuration(frameTarget / (totalPackets * buffer->get_channel_count()));
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    unsigned int packetIndex = 0;
+
     // Start the recording of the amount of time it takes to send the audio channels
     tx->audioTiming.start();
 
@@ -1738,13 +1780,16 @@ void audio_fec_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame
         for (int channel = 0; channel < buffer->get_channel_count(); channel++)
         {
             audio_tx_send_channel_segments(tx, rtp_session, buffer, channel, segment, fecMultFactor, pt, timestamp);
+            if (frameTarget != 0) {
+                wait_until_packet_target(start + packetDuration * ++packetIndex);
+            }
         }
     }
 
-    // Measure the time it has taken to send the video packets, and then, if enough time has passed,
+    // Measure the time it has taken to send the audio packets, and then, if enough time has passed,
     // report on it.
     tx->audioTiming.measure();
-    tx->audioTiming.report(static_cast<size_t>(totalPackets));
+    tx->audioTiming.report(static_cast<size_t>(totalPackets), frameTarget);
 
     tx->buffer++;
 }
