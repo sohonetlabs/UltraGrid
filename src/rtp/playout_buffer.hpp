@@ -123,6 +123,7 @@ private:
     void createFrame(std::unique_ptr<rtp_packet> packet, bool shouldLock);
 
     std::list<std::unique_ptr<BufferFrame>> frames; // A list of frames
+    std::optional<unsigned int> lastPoppedTimestamp; // RTP timestamp of the last frame handed to the decoder
 
     long long playoutDelayUs; // The delay for playing out in nanoseconds
     volatile int *offsetMs;   // The offset in milliseconds
