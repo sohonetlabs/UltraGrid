@@ -641,35 +641,58 @@ static bool fec_valid(rs* rsState, FecChannel* fecChannel) {
 }
 
 /**
+ * @brief Reads `length` bytes starting at byte `offset` of the channel's data segments, treating the K
+ *        segments as one contiguous buffer. The encoder lays the channel out as a 32-bit length word, the
+ *        audio payload header, then the samples, and splits that stream into K equal segments. Nothing
+ *        guarantees the segment size is larger than the 24-byte prefix, so any field may straddle a
+ *        segment boundary and must be read piecewise.
+ * @param fecChannel The recovered channel. Only the K data segments are read, never the parity segments.
+ * @param offset     Byte position within the logical channel stream to start reading from.
+ * @param dst        Destination buffer, which must hold at least `length` bytes.
+ * @param length     Number of bytes requested. The read is clamped to the data the segments actually hold.
+ * @return size_t The number of bytes actually copied, which is less than `length` when the request runs
+ *                past the end of the K segments.
+ */
+static size_t fec_channel_read(const FecChannel& fecChannel, size_t offset, char* dst, size_t length) {
+    const size_t segmentSize = fecChannel.getSegmentSize();
+    const size_t available = segmentSize * fecChannel.getKBlocks();
+    // Guard the modulo below and reject reads starting past the data
+    if (segmentSize == 0 || offset >= available) {
+        return 0;
+    }
+    // Clamp a bad value from driving an oversized copy
+    length = std::min(length, available - offset);
+    size_t copied = 0;
+    while (copied < length) {
+        // Calculate the size of the offset into the original segment. After the first loop `within`
+        // should always be zero.
+        const size_t within = offset % segmentSize;
+        // `chunkSize` will typically be the segment size, until the last chunk, where
+        // it'll be the remainder of the data held in the last segment.
+        const size_t chunkSize = std::min(length - copied, segmentSize - within);
+        // `segmentIndex` is an exact division because `within` has already been removed from the offset,
+        // so no rounding direction is relied upon.
+        const size_t segmentIndex = (offset - within) / segmentSize;
+        memcpy(dst + copied, fecChannel[segmentIndex] + within, chunkSize);
+        offset += chunkSize;
+        copied += chunkSize;
+    }
+    return copied;
+}
+
+/**
  * @brief Copies the recovered audio data of a channel out of its FEC segments into the frame, stripping the
  *        length word and audio header that the encoder prepended to the channel data.
  */
 static void audio_fec_copy_channel(FecChannel* fecChannel, audio_frame2 &frame, size_t channel) {
-    // If we have reached this point then the data in the FEC Channels segments block is the correct data!
-    // Get the first 4 bytes in the buffer, as they are the size of the original data length + header
-    // (so remove the audio header length)
+    constexpr size_t prefixSize = sizeof(uint32_t) + sizeof(audio_payload_hdr_t);
     uint32_t originalSize = 0;
-    memcpy(&originalSize, (*fecChannel)[0], sizeof originalSize);
-    uint32_t offset = 0;
-    uint32_t initialBlockOffset = (sizeof(uint32_t) + sizeof(audio_payload_hdr_t));
-    // The original size includes the audio header, so lets remove that
+    fec_channel_read(*fecChannel, 0, (char*) &originalSize, sizeof originalSize);
+    // The original size includes the audio header (but not itself), so lets remove that
     originalSize -= sizeof(audio_payload_hdr_t);
-    // Resize the frame so we know it's the correct size
     frame.resize(channel, originalSize);
-    // The first part of the data needs the audio header and data length removed from it
-    // (audio header is 5 32bit ints. data length is 1 32bit int).
-    frame.replace(channel, offset, (*fecChannel)[0] + initialBlockOffset,
-                  fecChannel->getSegmentSize() - initialBlockOffset);
-    // Reduce the original size by what we have written into the frame
-    originalSize -= fecChannel->getSegmentSize() - initialBlockOffset;
-    offset += fecChannel->getSegmentSize() - initialBlockOffset;
-    // The payload may end before the last data segment, with the remaining segments being padding
-    for (size_t i = 1; i < fecChannel->getKBlocks() && originalSize > 0; i++) {
-        uint32_t len = std::min(originalSize, fecChannel->getSegmentSize());
-        frame.replace(channel, offset, (*fecChannel)[i], len);
-        originalSize -= len;
-        offset += len;
-    }
+    const size_t copied = fec_channel_read(*fecChannel, prefixSize, frame.get_data(channel), originalSize);
+    frame.resize(channel, copied);
 }
 
 /**
@@ -763,9 +786,9 @@ static bool audio_fec_decode_channels(struct pbuf_audio_data *s, vector<std::uni
     uint32_t audioLen = 0;
     uint32_t audioHdrTuple = 0;
     uint32_t audioTag = 0;
-    memcpy(&audioLen, referenceChannel->getSegment(0), sizeof(uint32_t));
-    memcpy(&audioHdrTuple, referenceChannel->getSegment(0) + (4 * sizeof(uint32_t)), sizeof(uint32_t));
-    memcpy(&audioTag, referenceChannel->getSegment(0) + (5 * sizeof(uint32_t)), sizeof(uint32_t));
+    fec_channel_read(*referenceChannel, 0, (char*) &audioLen, sizeof audioLen);
+    fec_channel_read(*referenceChannel, 4 * sizeof(uint32_t), (char*) &audioHdrTuple, sizeof audioHdrTuple);
+    fec_channel_read(*referenceChannel, 5 * sizeof(uint32_t), (char*) &audioTag, sizeof audioTag);
     audioHdrTuple = ntohl(audioHdrTuple);
     audioTag = ntohl(audioTag);
     audioLen -= sizeof(audio_payload_hdr_t);
