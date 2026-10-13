@@ -1762,7 +1762,7 @@ void audio_fec_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame
     unsigned int fecMSize = buffer->get_fec_params(0).m + fecKSize;
 
     // Calculate the total amount of packets that will be sent per channel
-    unsigned int totalPackets = ceil(fecMSize / fecMultFactor);
+    unsigned int totalPackets = (fecMSize + fecMultFactor - 1) / fecMultFactor;
     // Calculate the amount of segments that need to be sent as a factor of the multiplication
     // that is applied when RS FEC is in use
     unsigned int segmentCount = totalPackets * fecMultFactor;
