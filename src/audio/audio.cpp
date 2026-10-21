@@ -106,7 +106,7 @@ enum audio_transport_device {
         NET_STANDARD
 };
 
-#define DEFAULT_AUDIO_RECV_BUF_SIZE (256 * 1024)
+#define DEFAULT_AUDIO_RECV_BUF_SIZE (4 * 1024 * 1024)
 #define MOD_NAME "[audio] "
 
 struct audio_network_parameters {
@@ -117,6 +117,7 @@ struct audio_network_parameters {
         int force_ip_version = 0;
         char *mcast_if = nullptr;
         int ttl = -1;
+        size_t recv_buf_size = DEFAULT_AUDIO_RECV_BUF_SIZE;
 };
 
 struct state_audio {
@@ -194,6 +195,11 @@ typedef void (*audio_device_help_t)(void);
 static void *audio_sender_thread(void *arg);
 static void *audio_receiver_thread(void *arg);
 static struct rtp *initialize_audio_network(struct audio_network_parameters *params);
+static void audio_set_recv_buf(struct rtp *device, size_t size);
+
+ADD_TO_PARAM("audio-recv-buf", "* audio-recv-buf=<bytes>\n"
+                "  Audio receive socket buffer size in bytes (default 4 MiB). Must hold a whole\n"
+                "  frame burst while the previous frame is being decoded.\n");
 static struct response *audio_receiver_process_message(struct state_audio *s, struct msg_receiver *msg);
 static struct response *audio_sender_process_message(struct state_audio *s, struct msg_sender *msg);
 
@@ -316,6 +322,10 @@ int audio_init(struct state_audio **ret, struct module *parent,
         s->audio_network_parameters.mcast_if = mcast_iface
                 ? strdup(mcast_iface) : NULL;
         s->audio_network_parameters.ttl = ttl;
+        if (get_commandline_param("audio-recv-buf")) {
+                s->audio_network_parameters.recv_buf_size = atoll(get_commandline_param("audio-recv-buf"));
+        }
+        s->recv_buf_size = s->audio_network_parameters.recv_buf_size;
         free(tmp);
 
         if (strcmp(opt->send_cfg, "none") != 0) {
@@ -522,10 +532,20 @@ static struct rtp *initialize_audio_network(struct audio_network_parameters *par
                 if (strcmp(params->addr, IN6_BLACKHOLE_STR) == 0) {
                         rtp_set_option(r, RTP_OPT_SEND_BACK, TRUE);
                 }
-                rtp_set_recv_buf(r, DEFAULT_AUDIO_RECV_BUF_SIZE);
+                audio_set_recv_buf(r, params->recv_buf_size);
         }
 
         return r;
+}
+
+static void audio_set_recv_buf(struct rtp *device, size_t size)
+{
+        if (rtp_set_recv_buf(device, size)) {
+                return;
+        }
+        LOG(LOG_LEVEL_WARNING) << MOD_NAME << "Unable to set receive buffer to " << size
+                << " B. Audio bursts may be dropped by the kernel. Please set net.core.rmem_max to "
+                << size << " or greater:\n\tsysctl -w net.core.rmem_max=" << size << "\n";
 }
 
 struct audio_decoder {
@@ -635,7 +655,7 @@ static void audio_update_recv_buf(struct state_audio *s, size_t curr_frame_len)
         if (new_size > s->recv_buf_size) {
                 s->recv_buf_size = new_size;
                 LOG(LOG_LEVEL_DEBUG) << "[Audio receiver] Recv buffer adjusted to " << new_size << "\n";
-                rtp_set_recv_buf(s->audio_network_device, s->recv_buf_size);
+                audio_set_recv_buf(s->audio_network_device, s->recv_buf_size);
         }
 }
 
