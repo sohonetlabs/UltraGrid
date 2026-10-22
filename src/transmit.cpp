@@ -1717,20 +1717,21 @@ void audio_tx_send_channel_segments(struct tx* tx, struct rtp *rtp_session, cons
  */
 static uint64_t audio_frame_target(struct tx* tx, const audio_frame2 * buffer) {
     if (tx->audioFrameTarget < 0) {
-        return static_cast<uint64_t>(buffer->get_duration() * NANOSECOND) / 2;
+        // The encoded buffer's duration counts the parity segments as samples
+        const fec_desc &fec = buffer->get_fec_params(0);
+        double sourceDuration = buffer->get_duration() * fec.k / (fec.k + fec.m);
+        return static_cast<uint64_t>(sourceDuration * NANOSECOND) / 2;
     }
     return tx->audioFrameTarget;
 }
 
 /**
- * @brief Sleeps until shortly before the target and spins for the remainder, since the scheduler's wake-up
- *        granularity is coarse relative to the gap between paced audio packets.
+ * @brief Sleeps for 90% of the gap between packets and spins for the remainder, since the scheduler's wake-up
+ *        varies by a large fraction of the gap between paced audio packets.
  */
-static void wait_until_packet_target(std::chrono::steady_clock::time_point target) {
-    constexpr std::chrono::microseconds spinWindow(200);
-    if (target - std::chrono::steady_clock::now() > spinWindow) {
-        std::this_thread::sleep_until(target - spinWindow);
-    }
+static void wait_until_packet_target(std::chrono::steady_clock::time_point target,
+                                     std::chrono::nanoseconds packetDuration) {
+    std::this_thread::sleep_until(target - packetDuration / 10);
     while (std::chrono::steady_clock::now() < target) {
     }
 }
@@ -1781,7 +1782,7 @@ void audio_fec_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame
         {
             audio_tx_send_channel_segments(tx, rtp_session, buffer, channel, segment, fecMultFactor, pt, timestamp);
             if (frameTarget != 0) {
-                wait_until_packet_target(start + packetDuration * ++packetIndex);
+                wait_until_packet_target(start + packetDuration * ++packetIndex, packetDuration);
             }
         }
     }
