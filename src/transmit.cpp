@@ -1699,9 +1699,10 @@ void audio_tx_send_channel_segments(struct tx* tx, struct rtp *rtp_session, cons
 }
 
 /**
- * @brief When using Reed-Solomon FEC it is best to send all of the audio data segments, followed by the parity segments.
- *        This means that all of the audio data will be received first, which if there are late packets gives the audio
- *        frame the best chance of being fully played back.
+ * @brief Sends the FEC segments of an audio frame interleaved across the channels: the first packet of every channel,
+ *        then the second packet of every channel, and so on through the parity packets. Consecutive packets on the
+ *        wire therefore belong to different channels, so a burst of loss is spread thinly over all of the channels
+ *        rather than concentrated on one, which is what the Reed-Solomon code can recover from.
  *
  * @param tx           The transmission structure
  * @param rtp_session  The rtp session
@@ -1723,30 +1724,20 @@ void audio_fec_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame
     unsigned int fecKSize = buffer->get_fec_params(0).k;
     unsigned int fecMSize = buffer->get_fec_params(0).m + fecKSize;
 
-    // Calculate the total amount of packets that will be sent
-    unsigned int totalPackets = ceil(fecMSize / fecMultFactor);
-    // Calculate the total amount of packets that contain the audio data
-    unsigned int audioSegmentPackets = ceil(fecKSize / fecMultFactor);
-    // Calculate the amount of audio segments that need to be sent as a factor of the multiplication
+    // Calculate the total amount of packets that will be sent per channel
+    unsigned int totalPackets = (fecMSize + fecMultFactor - 1) / fecMultFactor;
+    // Calculate the amount of segments that need to be sent as a factor of the multiplication
     // that is applied when RS FEC is in use
-    unsigned int audioSegmentCount = audioSegmentPackets * fecMultFactor;
-    // Calculate the remaining amount of parity segments that need to be sent (as a factor of the multiplication)
-    unsigned int paritySegmentCount = (totalPackets - audioSegmentPackets) * fecMultFactor;
+    unsigned int segmentCount = totalPackets * fecMultFactor;
 
     // Start the recording of the amount of time it takes to send the audio channels
     tx->audioTiming.start();
 
-    // Start by sending all of the segments containing the audio data
-    for (int channel = 0; channel < buffer->get_channel_count(); channel++)
-    {
-        audio_tx_send_channel_segments(tx, rtp_session, buffer, channel, 0, audioSegmentCount, pt, timestamp);
-    }
-    // Loop over the parity bits and send the parity segments channel by channel
-    for(unsigned int i = 0; i < paritySegmentCount; i += fecMultFactor) {
-        // Follow up with the parity segments on the end of each channel
+    // The last packet of the last channel carries the M bit, so the channel loop must stay innermost
+    for (unsigned int segment = 0; segment < segmentCount; segment += fecMultFactor) {
         for (int channel = 0; channel < buffer->get_channel_count(); channel++)
         {
-            audio_tx_send_channel_segments(tx, rtp_session, buffer, channel, audioSegmentCount + i, fecMultFactor, pt, timestamp);
+            audio_tx_send_channel_segments(tx, rtp_session, buffer, channel, segment, fecMultFactor, pt, timestamp);
         }
     }
 
