@@ -39,10 +39,16 @@ void PlayoutBuffer::insert(rtp_packet* packet) {
         std::unique_lock<std::mutex> lock = std::unique_lock<std::mutex>(this->frameMutex);
         // Find the matching frame for the packet
         auto frameIterator = std::find_if(this->frames.begin(), this->frames.end(), frameComparator);
-        
+
         // Check to see if we found an existing frame. If so, perform an insertion
         if(frameIterator != this->frames.end()) {
             (*frameIterator)->insertPacket(std::move(uPacket));
+        }
+        // A reordered packet for a frame that has already been popped would otherwise start a new,
+        // near-empty frame with the same timestamp that then fails to decode.
+        else if(this->lastPoppedTimestamp && static_cast<int32_t>(packetTimestamp - *this->lastPoppedTimestamp) <= 0) {
+            LOG(LOG_LEVEL_VERBOSE) << "[pbuf] Late packet for already decoded frame with timestamp: " << packetTimestamp << " - Discarding.\n";
+            free(uPacket.release());
         }
         // Check if the frames are empty
         else if(this->frames.empty()) {
@@ -109,6 +115,7 @@ std::unique_ptr<BufferFrame> PlayoutBuffer::popNextDisplayReadyFrame() {
             // Derefeference the iterator and move the frame before erasing it from the frame list
             frame = std::move(*firstDisplayReadyFrameIt);
             this->frames.erase(firstDisplayReadyFrameIt);
+            this->lastPoppedTimestamp = frame->getRtpTimestamp();
         }
         else {
             // Create a null pointer and hand this back to represent there are not more ready frames
