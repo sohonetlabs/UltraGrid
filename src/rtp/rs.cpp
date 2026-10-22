@@ -80,6 +80,7 @@ rs::rs(unsigned int k, unsigned int n, unsigned int mult)
         : m_k(k), m_n(n), m_mult(mult)
 {
         assert (mult > 0);
+        assert (k > 0);
         assert (k <= MAX_K);
         assert (n <= MAX_N);
         assert (m_k <= m_n);
@@ -122,7 +123,7 @@ rs::rs(const char *c_cfg)
                 m_mult = DEFAULT_MULT;
         }
         free(cfg);
-        if (m_k > MAX_K || m_n > MAX_N || m_k >= m_n) {
+        if (m_k == 0 || m_k > MAX_K || m_n > MAX_N || m_k >= m_n) {
                 usage();
                 throw 1;
         }
