@@ -1015,7 +1015,7 @@ static void *audio_sender_thread(void *arg)
 {
         set_thread_name(__func__);
 #ifdef __linux__
-        // The default 50 us timer slack exceeds the spin margin between paced audio FEC packets
+        // Inherited timer slack can exceed the spin margin between paced audio FEC packets
         prctl(PR_SET_TIMERSLACK, 1UL);
 #endif
         struct state_audio *s = (struct state_audio *) arg;
