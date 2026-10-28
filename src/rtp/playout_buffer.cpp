@@ -44,9 +44,9 @@ void PlayoutBuffer::insert(rtp_packet* packet) {
         if(frameIterator != this->frames.end()) {
             (*frameIterator)->insertPacket(std::move(uPacket));
         }
-        // A reordered packet for a frame that has already been popped would otherwise start a new,
-        // near-empty frame with the same timestamp that then fails to decode.
-        else if(this->lastPoppedTimestamp && static_cast<int32_t>(packetTimestamp - *this->lastPoppedTimestamp) <= 0) {
+        // A late packet for the frame just popped would otherwise start a new, near-empty frame that fails to
+        // decode. Match exactly: a clock sync can step RTP timestamps backwards for genuinely new frames.
+        else if(this->lastPoppedTimestamp && packetTimestamp == *this->lastPoppedTimestamp) {
             LOG(LOG_LEVEL_VERBOSE) << "[pbuf] Late packet for already decoded frame with timestamp: " << packetTimestamp << " - Discarding.\n";
             free(uPacket.release());
         }
