@@ -53,11 +53,14 @@
 #include "utils/misc.h"
 #include "video.h"
 #include "video_decompress.h"
+#include "utils/stage_latency_stats.hpp"
 #include "utils/synchronized_queue.h"
 #include "utils/thread.h"
 
 #include <cmpto_j2k_dec.h>
 
+#include <chrono>
+#include <cstring>
 #include <mutex>
 #include <queue>
 #include <utility>
@@ -89,6 +92,8 @@ struct state_decompress_j2k {
         unsigned int in_frames{}; ///< actual number of decompressed frames
 
         unsigned long long int dropped{}; ///< number of dropped frames because queue was full
+
+        StageLatencyStats decode_stats{"J2K decode stats"};
 
         void (*convert)(unsigned char *dst_buffer,
                 unsigned char *src_buffer,
@@ -157,6 +162,16 @@ static void *decompress_j2k_worker(void *args) {
                      decoding_error = "(failed)");
             log_msg(LOG_LEVEL_ERROR, "Image decoding failed: %s\n", decoding_error);
             continue;
+        }
+
+        void *custom_data;
+        size_t custom_data_size;
+        StageLatencyStats::clock::time_point pushed_at;
+        if (cmpto_j2k_dec_img_get_custom_data(img, &custom_data, &custom_data_size) == CMPTO_OK
+                && custom_data_size == sizeof pushed_at) {
+            memcpy(&pushed_at, custom_data, sizeof pushed_at);
+            auto now = StageLatencyStats::clock::now();
+            s->decode_stats.record(now - pushed_at, s->desc.fps, now);
         }
 
         void *dec_data;
@@ -452,6 +467,8 @@ static decompress_status j2k_decompress_empty_push(void *state, unsigned char *c
         struct cmpto_j2k_dec_img *img;
         pair<char *, size_t> decoded;
         void *tmp;
+        void *custom_data;
+        StageLatencyStats::clock::time_point pushed_at;
 
         // Sent a notice saying there needs to be a reconfiguration completed if the video codecs don't match.
         if (s->out_codec == VIDEO_CODEC_NONE) {
@@ -470,6 +487,11 @@ static decompress_status j2k_decompress_empty_push(void *state, unsigned char *c
 
         // Create the J2K img object
         CHECK_OK(cmpto_j2k_dec_img_create(s->decoder, &img), "Could not create frame", goto error);
+
+        CHECK_OK(cmpto_j2k_dec_img_allocate_custom_data(img, sizeof pushed_at, &custom_data),
+                        "Error allocating custom data", cmpto_j2k_dec_img_destroy(img); goto error);
+        pushed_at = StageLatencyStats::clock::now();
+        memcpy(custom_data, &pushed_at, sizeof pushed_at);
 
         // Allocate a temporary buffer, copy in the compressed buffer, and align it with the 
         // settings the J2K decoder expects.

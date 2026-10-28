@@ -84,6 +84,7 @@ public:
     // Getters
     size_t size();
     unsigned int getRtpTimestamp();
+    std::chrono::steady_clock::time_point getArrivalTime();
     bool isComplete();
     bool isReady();
     std::optional<std::reference_wrapper<rtp_packet>> getPacket(size_t index);
