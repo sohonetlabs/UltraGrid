@@ -62,6 +62,9 @@
 #include <string>
 #include <string.h>
 #include <stdlib.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include "audio/audio.h" 
 
@@ -1011,6 +1014,10 @@ static int find_codec_sample_rate(int sample_rate, const int *supported) {
 static void *audio_sender_thread(void *arg)
 {
         set_thread_name(__func__);
+#ifdef __linux__
+        // Inherited timer slack can exceed the spin margin between paced audio FEC packets
+        prctl(PR_SET_TIMERSLACK, 1UL);
+#endif
         struct state_audio *s = (struct state_audio *) arg;
         struct audio_frame *buffer = NULL;
         unique_ptr<audio_frame2_resampler> resampler_state;
