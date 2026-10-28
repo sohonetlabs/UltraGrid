@@ -117,6 +117,7 @@
 #include "utils/color_out.h"
 #include "utils/macros.h"
 #include "utils/misc.h"
+#include "utils/stage_latency_stats.hpp"
 #include "utils/synchronized_queue.h"
 #include "utils/thread.h"
 #include "utils/timed_message.h"
@@ -169,7 +170,7 @@ typedef void (*change_il_t)(char *dst, char *src, int linesize, int height, void
 static bool reconfigure_decoder(struct state_video_decoder *decoder,
                 struct video_desc desc, codec_t comp_int_fmt);
 static int check_for_mode_change(struct state_video_decoder *decoder, uint32_t *hdr);
-static void wait_for_framebuffer_swap(struct state_video_decoder *decoder);
+static steady_clock::duration wait_for_framebuffer_swap(struct state_video_decoder *decoder);
 static void *fec_thread(void *args);
 static void *decompress_thread(void *args);
 static void cleanup(struct state_video_decoder *decoder);
@@ -297,6 +298,7 @@ struct frame_msg {
         struct reported_statistics_cumul &stats;
         bool is_corrupted = false;
         bool is_displayed = false;
+        steady_clock::time_point queued_time{}; ///< when pushed to the FEC or decompress queue
 };
 
 struct main_msg_reconfigure {
@@ -390,6 +392,13 @@ struct state_video_decoder
         bool             reconfiguration_in_progress = false;
 #endif
         struct reported_statistics_cumul stats = {}; ///< stats to be reported through control socket
+
+        StageLatencyStats playout_stats{"Video playout buffer stats"};
+        StageLatencyStats rebuild_stats{"Video packet rebuild stats"};
+        StageLatencyStats fec_queue_stats{"Video FEC queue stats"};
+        StageLatencyStats fec_stats{"Video FEC decode stats"};
+        StageLatencyStats decompress_queue_stats{"Video decompress queue stats"};
+        StageLatencyStats framebuffer_wait_stats{"Video framebuffer swap wait stats"};
 };
 
 /**
@@ -397,9 +406,13 @@ struct state_video_decoder
  * can be filled with new data. Until this point, the video frame is not considered
  * valid.
  */
-static void wait_for_framebuffer_swap(struct state_video_decoder *decoder) {
+static steady_clock::duration wait_for_framebuffer_swap(struct state_video_decoder *decoder) {
+        auto wait_start = steady_clock::now();
         unique_lock<mutex> lk(decoder->lock);
         decoder->buffer_swapped_cv.wait(lk, [decoder]{return decoder->buffer_swapped;});
+        auto wait_end = steady_clock::now();
+        decoder->framebuffer_wait_stats.record(wait_end - wait_start, decoder->received_vid_desc.fps, wait_end);
+        return wait_end - wait_start;
 }
 
 #define ENCRYPTED_ERR "Receiving encrypted video data but " \
@@ -422,6 +435,10 @@ static void *fec_thread(void *args) {
                         decoder->decompress_queue.push(std::move(data));
                         break; // exit from loop
                 }
+
+                auto fec_start = steady_clock::now();
+                steady_clock::duration framebuffer_wait{};
+                decoder->fec_queue_stats.record(fec_start - data->queued_time, decoder->received_vid_desc.fps, fec_start);
 
                 struct video_frame *frame = decoder->frame;
                 struct tile *tile = NULL;
@@ -499,7 +516,7 @@ static void *fec_thread(void *args) {
                                 } else { // linedecoder
                                         if (!buffer_swapped) {
                                                 buffer_swapped = true;
-                                                wait_for_framebuffer_swap(decoder);
+                                                framebuffer_wait = wait_for_framebuffer_swap(decoder);
                                                 unique_lock<mutex> lk(decoder->lock);
                                                 decoder->buffer_swapped = false;
                                         }
@@ -550,6 +567,8 @@ static void *fec_thread(void *args) {
                         }
                 }
 
+                data->queued_time = steady_clock::now();
+                decoder->fec_stats.record(data->queued_time - fec_start - framebuffer_wait, decoder->received_vid_desc.fps, data->queued_time);
                 decoder->decompress_queue.push(std::move(data));
 cleanup:
                 ;
@@ -753,6 +772,7 @@ static void *decompress_thread(void *args) {
                 }
 
                 auto t0 = std::chrono::steady_clock::now();
+                decoder->decompress_queue_stats.record(t0 - msg->queued_time, decoder->received_vid_desc.fps, t0);
                 unique_ptr<char[]> tmp;
 
                 if (decoder->out_codec == VIDEO_CODEC_END) {
@@ -2114,6 +2134,7 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
 #endif
         }
         if (msg_reconf->last_frame) {
+                msg_reconf->last_frame->queued_time = steady_clock::now();
                 decoder->fec_queue.push(std::move(msg_reconf->last_frame));
         }
         delete msg_reconf;
@@ -2165,6 +2186,11 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
         vf_free(frame);
         return false;
     }
+
+    // The playout delay is deliberate, so its frames are not compared against the frame time.
+    auto rebuild_start = steady_clock::now();
+    steady_clock::duration framebuffer_wait{};
+    decoder->playout_stats.record(rebuild_start - bufferFrame->getArrivalTime(), 0, rebuild_start);
 
     unsigned int largestSubstream = 0;
     openssl_mode cryptoMode = MODE_AES128_NONE;
@@ -2311,7 +2337,7 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
     // Allocate memory if we're looking at an LDGM frame, or wait for the frame buffer swap to occur
     if ((packetType == PT_VIDEO || packetType == PT_ENCRYPT_VIDEO) && decoder->decoder_type == LINE_DECODER) {
         // Wait for the buffer swap to occur
-        wait_for_framebuffer_swap(decoder);
+        framebuffer_wait = wait_for_framebuffer_swap(decoder);
         unique_lock<mutex> lk(decoder->lock);
         decoder->buffer_swapped = false;
     }
@@ -2382,6 +2408,9 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
         fec_msg->pckt_list = std::move(fecPacketData);
         fec_msg->received_pkts_cum = stats.getReceivedPacketsTotal();
         fec_msg->expected_pkts_cum = stats.getExpectedPacketsTotal();
+
+        fec_msg->queued_time = steady_clock::now();
+        decoder->rebuild_stats.record(fec_msg->queued_time - rebuild_start - framebuffer_wait, decoder->received_vid_desc.fps, fec_msg->queued_time);
 
         auto t0 = std::chrono::steady_clock::now();
         decoder->fec_queue.push(std::move(fec_msg));
