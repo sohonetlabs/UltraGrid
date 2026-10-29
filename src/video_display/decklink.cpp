@@ -66,6 +66,7 @@
 #include "video.h"
 #include "video_display.h"
 #include "video_display/decklink_drift_fix.hpp"
+#include "video_display/decklink_reference_status.hpp"
 
 #include <algorithm>
 #include <array>
@@ -74,6 +75,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -320,6 +322,7 @@ struct device_state {
         IDeckLinkOutput            *deckLinkOutput;
         IDeckLinkConfiguration     *deckLinkConfiguration;
         IDeckLinkProfileAttributes *deckLinkAttributes;
+        IDeckLinkStatus            *deckLinkStatus;
 };
 
 struct state_decklink {
@@ -363,6 +366,7 @@ struct state_decklink {
 
         AudioDriftFixer audio_drift_fixer{};
         FrameIntervalStats video_summary{"Decklink video stats"};
+        DecklinkReferenceStatus reference_status{};
  };
 
 static void show_help(bool full);
@@ -556,6 +560,54 @@ display_decklink_getf(void *state)
         return out;
 }
 
+static string get_mode_name(IDeckLinkOutput *output, BMDDisplayMode mode)
+{
+        IDeckLinkDisplayMode *display_mode = nullptr;
+        BMD_STR name = nullptr;
+        string out;
+        if (output->GetDisplayMode(mode, &display_mode) != S_OK) {
+                return string{(char) (mode >> 24), (char) (mode >> 16), (char) (mode >> 8), (char) mode};
+        }
+        if (display_mode->GetName(&name) == S_OK) {
+                out = get_str_from_bmd_api_str(name);
+                release_bmd_api_str(name);
+        }
+        display_mode->Release();
+        return out;
+}
+
+static void check_reference_status(struct state_decklink *s)
+{
+        auto now = chrono::steady_clock::now();
+        if (!s->reference_status.poll_due(now)) {
+                return;
+        }
+
+        for (int i = 0; i < s->devices_cnt; ++i) {
+                IDeckLinkStatus *status = s->state[i].deckLinkStatus;
+                if (status == nullptr) {
+                        continue;
+                }
+
+                DecklinkReference reference{};
+                BMD_BOOL locked = BMD_FALSE;
+                if (status->GetFlag(bmdDeckLinkStatusReferenceSignalLocked, &locked) == S_OK) {
+                        reference.locked = locked == BMD_TRUE;
+                }
+                int64_t mode = 0;
+                if (status->GetInt(bmdDeckLinkStatusReferenceSignalMode, &mode) == S_OK && mode != bmdModeUnknown) {
+                        reference.mode = get_mode_name(s->state[i].deckLinkOutput, (BMDDisplayMode) mode);
+                }
+                int64_t temperature = 0;
+                optional<int64_t> temperature_c;
+                if (status->GetInt(bmdDeckLinkStatusDeviceTemperature, &temperature) == S_OK) {
+                        temperature_c = temperature;
+                }
+                s->reference_status.update(i, reference, temperature_c, now);
+        }
+        s->reference_status.report_if_due(now);
+}
+
 static void update_timecode(DeckLinkTimecode *tc, double fps)
 {
         const float epsilon = 0.005;
@@ -629,6 +681,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
         }
 
         s->video_summary.record();
+        check_reference_status(s);
 
         for (int j = 0; j < s->devices_cnt; ++j) {
                 IDeckLinkMutableVideoFrame *deckLinkFrame =
@@ -746,6 +799,7 @@ display_decklink_reconfigure_video(void *state, struct video_desc desc)
         
         s->vid_desc = desc;
         s->video_summary.set_fps(desc.fps);
+        s->reference_status.reset(s->devices_cnt);
 
         if (desc.color_spec == R10k && get_commandline_param(R10K_FULL_OPT) == nullptr) {
                 log_msg(LOG_LEVEL_WARNING, MOD_NAME "Using limited range R10k as specified by BMD, use '--param "
@@ -1230,6 +1284,11 @@ static void *display_decklink_init(struct module *parent, const char *fmt, unsig
                         goto error;
                 }
 
+                if (s->state.at(i).deckLink->QueryInterface(IID_IDeckLinkStatus, reinterpret_cast<void**>(&s->state.at(i).deckLinkStatus)) != S_OK) {
+                        s->state.at(i).deckLinkStatus = nullptr;
+                        log_msg(LOG_LEVEL_WARNING, MOD_NAME "Could not obtain the IDeckLinkStatus interface, reference status will not be reported.\n");
+                }
+
                 // Query the DeckLink for its configuration interface
                 result = s->state.at(i).deckLink->QueryInterface(IID_IDeckLinkConfiguration, reinterpret_cast<void**>(&deckLinkConfiguration));
                 s->state.at(i).deckLinkConfiguration = deckLinkConfiguration;
@@ -1375,6 +1434,7 @@ static void display_decklink_done(void *state)
                 }
 
                 RELEASE_IF_NOT_NULL(s->state.at(i).deckLinkAttributes);
+                RELEASE_IF_NOT_NULL(s->state.at(i).deckLinkStatus);
                 RELEASE_IF_NOT_NULL(s->state.at(i).deckLinkConfiguration);
                 RELEASE_IF_NOT_NULL(s->state.at(i).deckLinkOutput);
                 RELEASE_IF_NOT_NULL(s->state.at(i).deckLink);
