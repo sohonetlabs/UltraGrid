@@ -10,7 +10,6 @@ class decklink_output_clock_stats_test : public CPPUNIT_NS::TestFixture
   CPPUNIT_TEST( test_slow_stream_repeats );
   CPPUNIT_TEST( test_fast_stream_skips );
   CPPUNIT_TEST( test_jitter_at_boundary );
-  CPPUNIT_TEST( test_blocking_call_counts_shown_slot );
   CPPUNIT_TEST( test_stall_is_not_a_repeat );
   CPPUNIT_TEST( test_stall_restarts_drift );
   CPPUNIT_TEST( test_lasting_jump_reseeds_drift );
@@ -30,7 +29,6 @@ public:
   void test_slow_stream_repeats();
   void test_fast_stream_skips();
   void test_jitter_at_boundary();
-  void test_blocking_call_counts_shown_slot();
   void test_stall_is_not_a_repeat();
   void test_stall_restarts_drift();
   void test_lasting_jump_reseeds_drift();

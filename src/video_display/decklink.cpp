@@ -673,12 +673,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
                 }
         }
         if (have_clock) {
-                auto display_call = chrono::steady_clock::now() - display_start;
-                DecklinkHardwareClock after_call{0, 0, 0, s->frameRateScale};
-                if (s->state.at(0).deckLinkOutput->GetHardwareReferenceClock(s->frameRateScale, &after_call.time,
-                                        &after_call.time_in_frame, &after_call.ticks_per_frame) == S_OK) {
-                        s->output_clock.record_handoff(hw, after_call, display_call, display_start);
-                }
+                s->output_clock.record_handoff(hw, chrono::steady_clock::now() - display_start, display_start);
         }
         s->frames++;
         if(s->emit_timecode) {
