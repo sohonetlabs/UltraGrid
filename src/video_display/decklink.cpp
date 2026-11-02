@@ -66,6 +66,7 @@
 #include "video.h"
 #include "video_display.h"
 #include "video_display/decklink_drift_fix.hpp"
+#include "video_display/decklink_output_clock_stats.hpp"
 
 #include <algorithm>
 #include <array>
@@ -114,6 +115,16 @@ using namespace std;
 static int display_decklink_putf(void *state, struct video_frame *frame, long long nonblock);
 
 namespace {
+DecklinkOutputClockStats::Completion to_completion(BMDOutputFrameCompletionResult result)
+{
+        switch (result) {
+        case bmdOutputFrameDisplayedLate: return DecklinkOutputClockStats::Completion::late;
+        case bmdOutputFrameDropped: return DecklinkOutputClockStats::Completion::dropped;
+        case bmdOutputFrameFlushed: return DecklinkOutputClockStats::Completion::flushed;
+        default: return DecklinkOutputClockStats::Completion::completed;
+        }
+}
+
 class PlaybackDelegate : public IDeckLinkVideoOutputCallback // , public IDeckLinkAudioOutputCallback
 {
 private:
@@ -123,6 +134,8 @@ private:
 
         friend int ::display_decklink_putf(void *state, struct video_frame *frame, long long nonblock);
 public:
+        DecklinkOutputClockStats *clock_stats = nullptr;
+
         virtual ~PlaybackDelegate() = default;
         // IUnknown needs only a dummy implementation
         virtual HRESULT STDMETHODCALLTYPE        QueryInterface (REFIID , LPVOID *)        { return E_NOINTERFACE;}
@@ -140,6 +153,9 @@ public:
                 } else if (result == bmdOutputFrameFlushed){
                         frames_flushed += 1;
                         LOG(LOG_LEVEL_WARNING) << MOD_NAME "Flushed frame (total: " << frames_flushed << ")\n";
+                }
+                if (clock_stats != nullptr) {
+                        clock_stats->record_completion(to_completion(result));
                 }
 
 		if (log_level >= LOG_LEVEL_DEBUG) {
@@ -363,6 +379,7 @@ struct state_decklink {
 
         AudioDriftFixer audio_drift_fixer{};
         FrameIntervalStats video_summary{"Decklink video stats"};
+        DecklinkOutputClockStats output_clock{};
  };
 
 static void show_help(bool full);
@@ -612,6 +629,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
         if (timeout_ns == PUTF_DISCARD || i > max_frames) {
                 if (timeout_ns != PUTF_DISCARD) {
                         log_msg(LOG_LEVEL_WARNING, MOD_NAME "Frame dropped!\n");
+                        s->output_clock.record_handoff_drop();
                 }
                 for (int j = 0; j < s->devices_cnt; ++j) {
                         IDeckLinkMutableVideoFrame *deckLinkFrame =
@@ -630,6 +648,15 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
 
         s->video_summary.record();
 
+        if (!s->low_latency) {
+                s->output_clock.record_queue_depth(i);
+        }
+        // all outputs of a quad-link card share one clock, so the first is enough
+        DecklinkHardwareClock hw{0, 0, 0, s->frameRateScale};
+        bool have_clock = s->state.at(0).deckLinkOutput->GetHardwareReferenceClock(s->frameRateScale, &hw.time,
+                                &hw.time_in_frame, &hw.ticks_per_frame) == S_OK;
+        auto display_start = chrono::steady_clock::now();
+
         for (int j = 0; j < s->devices_cnt; ++j) {
                 IDeckLinkMutableVideoFrame *deckLinkFrame =
                         (*((vector<IDeckLinkMutableVideoFrame *> *) frame->callbacks.dispose_udata))[j];
@@ -644,6 +671,9 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
                         s->state[j].deckLinkOutput->ScheduleVideoFrame(deckLinkFrame,
                                         s->frames * s->frameRateDuration, s->frameRateDuration, s->frameRateScale);
                 }
+        }
+        if (have_clock) {
+                s->output_clock.record_handoff(hw, chrono::steady_clock::now() - display_start, display_start);
         }
         s->frames++;
         if(s->emit_timecode) {
@@ -746,6 +776,7 @@ display_decklink_reconfigure_video(void *state, struct video_desc desc)
         
         s->vid_desc = desc;
         s->video_summary.set_fps(desc.fps);
+        s->output_clock.reset(s->low_latency);
 
         if (desc.color_spec == R10k && get_commandline_param(R10K_FULL_OPT) == nullptr) {
                 log_msg(LOG_LEVEL_WARNING, MOD_NAME "Using limited range R10k as specified by BMD, use '--param "
@@ -1329,6 +1360,9 @@ static void *display_decklink_init(struct module *parent, const char *fmt, unsig
                 }
 
                 s->state.at(i).delegate = new PlaybackDelegate();
+                if (i == 0) {
+                        s->state.at(i).delegate->clock_stats = &s->output_clock;
+                }
                 // Provide this class as a delegate to the audio and video output interfaces
                 if (!s->low_latency) {
                         s->state.at(i).deckLinkOutput->SetScheduledFrameCompletionCallback(s->state.at(i).delegate);
