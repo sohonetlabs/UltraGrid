@@ -29,14 +29,14 @@ struct DecklinkHardwareClock {
 
 /**
  * @brief Tracks frames handed to the card against the card's own output clock and reports periodically
- *        where the clock difference makes the output repeat or skip frames.
+ *        how far the stream and card clocks differ.
  *
- * A slot is one output period of the card; the card shows one video frame per slot. In low-latency mode each
- * hand-off is placed in the slot it lands in. A slot with no hand-off repeats the previous frame; two
- * hand-offs in one slot mean the first is never shown.
+ * A slot is one output period of the card. Phase is how far into its slot a hand-off lands. Stream vs card is
+ * the drift of the phase: negative when the stream runs slower than the card, so the card's buffer drains and
+ * it repeats a frame each slip.
  *
- * Phase is how far into its slot a hand-off lands. Stream vs card is the drift of the phase: negative when
- * the stream runs slower than the card, which makes the card repeat a frame each slip.
+ * Hand-offs aren't mapped to the slot they're shown in: in low-latency mode the card buffers frames, so the
+ * hand-off slot doesn't say when a frame is shown.
  *
  * Safe to record from several threads at once.
  */
@@ -47,7 +47,6 @@ public:
 
         enum class Completion { completed, late, dropped, flushed };
 
-        static constexpr double NEAR_BOUNDARY_RATIO = 0.1;
         static constexpr std::chrono::seconds REPORT_INTERVAL{10};
         static constexpr std::chrono::milliseconds STALL{500};
         static constexpr double PHASE_SMOOTHING = 0.05;
@@ -76,32 +75,18 @@ public:
                 int64_t slot = (hw.time - hw.time_in_frame) / hw.ticks_per_frame;
 
                 if (this->has_prev) {
-                        int64_t gap = slot - this->prev_slot;
-                        bool card_clock_reset = gap < 0;
+                        bool card_clock_reset = slot < this->prev_slot;
                         if (card_clock_reset || now - this->prev_now > STALL) {
                                 // the stream resumes at an unrelated phase, which would bias the drift fit
                                 this->drift.started = false;
                                 this->has_card_ref = this->has_card_ref && !card_clock_reset;
-                                if (this->low_latency) {
-                                        this->stalls++;
-                                }
-                        } else if (this->low_latency && gap == 0) {
-                                this->skipped++;
-                        } else if (this->low_latency && gap > 1) {
-                                this->repeated += gap - 1;
+                                this->stalls++;
                         }
                 }
                 this->has_prev = true;
                 this->prev_slot = slot;
                 this->prev_now = now;
 
-                this->last_phase_us = phase_us;
-                this->phase_max_us = std::max(this->phase_max_us, phase_us);
-                this->phase_min_us = std::min(this->phase_min_us, phase_us);
-                double margin = slot_us * NEAR_BOUNDARY_RATIO;
-                if (phase_us < margin || phase_us > slot_us - margin) {
-                        this->near_boundary++;
-                }
                 this->display_call_max = std::max(this->display_call_max,
                                 std::chrono::duration_cast<std::chrono::microseconds>(display_call));
 
@@ -137,24 +122,9 @@ public:
                 return this->frames;
         }
 
-        uint64_t get_repeated() {
-                std::lock_guard<std::mutex> lk(this->lock);
-                return this->repeated;
-        }
-
-        uint64_t get_skipped() {
-                std::lock_guard<std::mutex> lk(this->lock);
-                return this->skipped;
-        }
-
         uint64_t get_stalls() {
                 std::lock_guard<std::mutex> lk(this->lock);
                 return this->stalls;
-        }
-
-        uint64_t get_near_boundary() {
-                std::lock_guard<std::mutex> lk(this->lock);
-                return this->near_boundary;
         }
 
         uint64_t get_late() {
@@ -345,30 +315,22 @@ private:
                 std::ostringstream out;
                 out << std::fixed << std::setprecision(1)
                                 << SUNDERLINE("Decklink output clock stats (cumulative)")
-                                << " - Total Video Frames: " << SBOLD(this->frames);
-                if (this->low_latency) {
-                        out << " / Repeated Slots: " << SBOLD(this->repeated)
-                                        << " / Skipped Frames: " << SBOLD(this->skipped)
-                                        << " / Stalls: " << SBOLD(this->stalls);
-                }
-                out << " / Near Slot Boundary: " << SBOLD(this->near_boundary);
+                                << " - Total Video Frames: " << SBOLD(this->frames)
+                                << " / Stalls: " << SBOLD(this->stalls);
                 if (this->period_frames > 0) {
-                        out << " / Last phase (ms): " << SBOLD(this->last_phase_us / 1000)
-                                        << " / Max phase (ms): " << SBOLD(this->phase_max_us / 1000)
-                                        << " / Min phase (ms): " << SBOLD(this->phase_min_us / 1000)
-                                        << " / Max display call (ms): " << SBOLD(this->display_call_max.count() / 1000.0);
+                        out << " / Max display call (ms): " << SBOLD(this->display_call_max.count() / 1000.0);
                 }
                 out << " / Stream vs card (ppm): " << SBOLD(ppm(this->stream_vs_card_ppm()))
                                 << " / Slip every (s): " << SBOLD(this->slip_interval())
                                 << " / Card vs host (ppm): " << SBOLD(ppm(this->card_vs_host_ppm));
+                if (this->queue_min <= this->queue_max) {
+                        out << " / Max queued: " << SBOLD(this->queue_max)
+                                        << " / Min queued: " << SBOLD(this->queue_min);
+                }
                 if (!this->low_latency) {
                         out << " / Late: " << SBOLD(this->late)
                                         << " / Dropped: " << SBOLD(this->dropped)
                                         << " / Flushed: " << SBOLD(this->flushed);
-                        if (this->queue_min <= this->queue_max) {
-                                out << " / Max queued: " << SBOLD(this->queue_max)
-                                                << " / Min queued: " << SBOLD(this->queue_min);
-                        }
                 }
                 out << " / Hand-off drops: " << SBOLD(this->handoff_drops);
                 LOG(LOG_LEVEL_INFO) << out.str() << "\n";
@@ -376,8 +338,6 @@ private:
 
         void reset_period() {
                 this->period_frames = 0;
-                this->phase_max_us = 0;
-                this->phase_min_us = std::numeric_limits<double>::max();
                 this->display_call_max = std::chrono::microseconds::zero();
                 this->queue_max = 0;
                 this->queue_min = std::numeric_limits<uint32_t>::max();
@@ -387,10 +347,7 @@ private:
         bool low_latency = true;
 
         uint64_t frames = 0;
-        uint64_t repeated = 0;
-        uint64_t skipped = 0;
         uint64_t stalls = 0;
-        uint64_t near_boundary = 0;
         uint64_t late = 0;
         uint64_t dropped = 0;
         uint64_t flushed = 0;
@@ -413,9 +370,6 @@ private:
 
         // the rest cover only the time since the last report
         uint64_t period_frames = 0;
-        double last_phase_us = 0;
-        double phase_max_us = 0;
-        double phase_min_us = std::numeric_limits<double>::max();
         std::chrono::microseconds display_call_max = std::chrono::microseconds::zero();
         uint32_t queue_max = 0;
         uint32_t queue_min = std::numeric_limits<uint32_t>::max();

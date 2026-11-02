@@ -648,9 +648,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
 
         s->video_summary.record();
 
-        if (!s->low_latency) {
-                s->output_clock.record_queue_depth(i);
-        }
+        s->output_clock.record_queue_depth(i);
         // all outputs of a quad-link card share one clock, so the first is enough
         DecklinkHardwareClock hw{0, 0, 0, s->frameRateScale};
         bool have_clock = s->state.at(0).deckLinkOutput->GetHardwareReferenceClock(s->frameRateScale, &hw.time,

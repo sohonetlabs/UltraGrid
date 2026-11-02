@@ -81,15 +81,12 @@ decklink_output_clock_stats_test::test_matched_clocks()
         Simulation{}.run(stats, 2000);
 
         CPPUNIT_ASSERT_EQUAL(uint64_t{2000}, stats.get_frames());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_repeated());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_skipped());
         CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_stalls());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_near_boundary());
         CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, stats.get_stream_vs_card_ppm(), 1.0);
 }
 
 void
-decklink_output_clock_stats_test::test_slow_stream_repeats()
+decklink_output_clock_stats_test::test_slow_stream_drift()
 {
         DecklinkOutputClockStats stats;
         stats.reset(true);
@@ -97,13 +94,11 @@ decklink_output_clock_stats_test::test_slow_stream_repeats()
         sim.stream_ppm = -1000;
         sim.run(stats, 3000);
 
-        CPPUNIT_ASSERT_EQUAL(uint64_t{3}, stats.get_repeated());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_skipped());
         CPPUNIT_ASSERT_DOUBLES_EQUAL(-1000.0, stats.get_stream_vs_card_ppm(), 10.0);
 }
 
 void
-decklink_output_clock_stats_test::test_fast_stream_skips()
+decklink_output_clock_stats_test::test_fast_stream_drift()
 {
         DecklinkOutputClockStats stats;
         stats.reset(true);
@@ -111,28 +106,25 @@ decklink_output_clock_stats_test::test_fast_stream_skips()
         sim.stream_ppm = 1000;
         sim.run(stats, 3000);
 
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_repeated());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{3}, stats.get_skipped());
         CPPUNIT_ASSERT_DOUBLES_EQUAL(1000.0, stats.get_stream_vs_card_ppm(), 10.0);
 }
 
 void
-decklink_output_clock_stats_test::test_jitter_at_boundary()
+decklink_output_clock_stats_test::test_jitter_across_boundary_keeps_drift()
 {
         DecklinkOutputClockStats stats;
         stats.reset(true);
         Simulation sim;
         sim.card_offset_ticks = 995;
-        sim.jitter_ticks = [](int i) { return i % 2 == 0 ? 10 : -10; };
-        sim.run(stats, 100);
+        sim.jitter_ticks = [](int i) { return i % 2 == 0 ? 200 : -200; };
+        sim.run(stats, 24 * 120);
 
-        CPPUNIT_ASSERT_EQUAL(uint64_t{49}, stats.get_repeated());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{50}, stats.get_skipped());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{100}, stats.get_near_boundary());
+        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_stalls());
+        CPPUNIT_ASSERT_DOUBLES_EQUAL(0.0, stats.get_stream_vs_card_ppm(), 2.0);
 }
 
 void
-decklink_output_clock_stats_test::test_stall_is_not_a_repeat()
+decklink_output_clock_stats_test::test_stall_is_counted()
 {
         DecklinkOutputClockStats stats;
         stats.reset(true);
@@ -142,8 +134,6 @@ decklink_output_clock_stats_test::test_stall_is_not_a_repeat()
         sim.run(stats, 100);
 
         CPPUNIT_ASSERT_EQUAL(uint64_t{1}, stats.get_stalls());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_repeated());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_skipped());
 }
 
 void
@@ -190,12 +180,10 @@ decklink_output_clock_stats_test::test_reset_forgets_slot()
         sim.run(stats, 100);
 
         stats.reset(true);
-        sim.card_offset_ticks = 7250;
+        sim.card_offset_ticks = -50000;
         sim.run(stats, 100);
 
         CPPUNIT_ASSERT_EQUAL(uint64_t{200}, stats.get_frames());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_repeated());
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_skipped());
         CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_stalls());
 }
 
@@ -215,7 +203,6 @@ decklink_output_clock_stats_test::test_scheduled_mode()
         stats.record_handoff_drop(T0);
         stats.record_queue_depth(3);
 
-        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_repeated());
         CPPUNIT_ASSERT_EQUAL(uint64_t{2}, stats.get_late());
         CPPUNIT_ASSERT_EQUAL(uint64_t{1}, stats.get_dropped());
         CPPUNIT_ASSERT_EQUAL(uint64_t{1}, stats.get_flushed());
