@@ -32,10 +32,11 @@ struct DecklinkHardwareClock {
  *        where the clock difference makes the output repeat or skip frames.
  *
  * A slot is one output period of the card; the card shows one video frame per slot. In low-latency mode each
- * hand-off is placed in the slot it lands in. A slot with no hand-off repeats the previous frame; two
- * hand-offs in one slot mean the first is never shown.
+ * hand-off is placed in the slot the display call returns in, as DisplayVideoFrameSync can block until the card
+ * takes the frame. A slot with no hand-off repeats the previous frame; two hand-offs in one slot mean the first
+ * is never shown.
  *
- * Phase is how far into its slot a hand-off lands. Stream vs card is the drift of the phase: negative when
+ * Phase is how far into its slot a frame is ready, read before the display call. Stream vs card is the drift of the phase: negative when
  * the stream runs slower than the card, which makes the card repeat a frame each slip.
  *
  * Safe to record from several threads at once.
@@ -63,17 +64,23 @@ public:
                 this->has_card_ref = false;
         }
 
-        void record_handoff(const DecklinkHardwareClock &hw, clock::duration display_call, clock::time_point now = clock::now()) {
+        /// @param ready     card clock read before the display call
+        /// @param after_call card clock read after the display call
+        void record_handoff(const DecklinkHardwareClock &ready, const DecklinkHardwareClock &after_call,
+                        clock::duration display_call, clock::time_point now = clock::now()) {
                 std::lock_guard<std::mutex> lk(this->lock);
-                if (hw.ticks_per_frame <= 0 || hw.timescale <= 0) {
+                if (ready.ticks_per_frame <= 0 || ready.timescale <= 0
+                                || after_call.ticks_per_frame != ready.ticks_per_frame
+                                || after_call.timescale != ready.timescale) {
                         return;
                 }
                 this->frames++;
                 this->period_frames++;
 
-                double slot_us = 1e6 * hw.ticks_per_frame / hw.timescale;
-                double phase_us = 1e6 * hw.time_in_frame / hw.timescale;
-                int64_t slot = (hw.time - hw.time_in_frame) / hw.ticks_per_frame;
+                double slot_us = 1e6 * ready.ticks_per_frame / ready.timescale;
+                double phase_us = 1e6 * ready.time_in_frame / ready.timescale;
+                double after_call_phase_us = 1e6 * after_call.time_in_frame / after_call.timescale;
+                int64_t slot = (after_call.time - after_call.time_in_frame) / after_call.ticks_per_frame;
 
                 if (this->has_prev) {
                         int64_t gap = slot - this->prev_slot;
@@ -98,6 +105,9 @@ public:
                 this->last_phase_us = phase_us;
                 this->phase_max_us = std::max(this->phase_max_us, phase_us);
                 this->phase_min_us = std::min(this->phase_min_us, phase_us);
+                this->last_after_call_phase_us = after_call_phase_us;
+                this->after_call_phase_max_us = std::max(this->after_call_phase_max_us, after_call_phase_us);
+                this->after_call_phase_min_us = std::min(this->after_call_phase_min_us, after_call_phase_us);
                 double margin = slot_us * NEAR_BOUNDARY_RATIO;
                 if (phase_us < margin || phase_us > slot_us - margin) {
                         this->near_boundary++;
@@ -106,7 +116,7 @@ public:
                                 std::chrono::duration_cast<std::chrono::microseconds>(display_call));
 
                 this->track_drift(phase_us, slot_us, now);
-                this->track_card_clock(hw, now);
+                this->track_card_clock(ready, now);
                 this->report_if_due(now);
         }
 
@@ -356,6 +366,9 @@ private:
                         out << " / Last phase (ms): " << SBOLD(this->last_phase_us / 1000)
                                         << " / Max phase (ms): " << SBOLD(this->phase_max_us / 1000)
                                         << " / Min phase (ms): " << SBOLD(this->phase_min_us / 1000)
+                                        << " / Last after-call phase (ms): " << SBOLD(this->last_after_call_phase_us / 1000)
+                                        << " / Max after-call phase (ms): " << SBOLD(this->after_call_phase_max_us / 1000)
+                                        << " / Min after-call phase (ms): " << SBOLD(this->after_call_phase_min_us / 1000)
                                         << " / Max display call (ms): " << SBOLD(this->display_call_max.count() / 1000.0);
                 }
                 out << " / Stream vs card (ppm): " << SBOLD(ppm(this->stream_vs_card_ppm()))
@@ -378,6 +391,8 @@ private:
                 this->period_frames = 0;
                 this->phase_max_us = 0;
                 this->phase_min_us = std::numeric_limits<double>::max();
+                this->after_call_phase_max_us = 0;
+                this->after_call_phase_min_us = std::numeric_limits<double>::max();
                 this->display_call_max = std::chrono::microseconds::zero();
                 this->queue_max = 0;
                 this->queue_min = std::numeric_limits<uint32_t>::max();
@@ -416,6 +431,9 @@ private:
         double last_phase_us = 0;
         double phase_max_us = 0;
         double phase_min_us = std::numeric_limits<double>::max();
+        double last_after_call_phase_us = 0;
+        double after_call_phase_max_us = 0;
+        double after_call_phase_min_us = std::numeric_limits<double>::max();
         std::chrono::microseconds display_call_max = std::chrono::microseconds::zero();
         uint32_t queue_max = 0;
         uint32_t queue_min = std::numeric_limits<uint32_t>::max();

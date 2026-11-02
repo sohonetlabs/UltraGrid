@@ -37,6 +37,7 @@ struct Simulation {
         int64_t card_offset_ticks = 500;
         double host_s = 0;
         std::function<int64_t(int)> jitter_ticks = [](int) { return 0; };
+        std::function<int64_t(int64_t)> after_call_ticks = [](int64_t ready) { return ready; };
 
         void run(DecklinkOutputClockStats &stats, int frames) {
                 for (int i = 0; i < frames; ++i) {
@@ -48,9 +49,11 @@ struct Simulation {
         void handoff(DecklinkOutputClockStats &stats, int i) {
                 int64_t card = std::llround(host_s * TIMESCALE * (1 + card_ppm * 1e-6)) + card_offset_ticks
                         + jitter_ticks(i);
-                DecklinkHardwareClock hw{card, card % TICKS_PER_FRAME, TICKS_PER_FRAME, TIMESCALE};
+                DecklinkHardwareClock ready{card, card % TICKS_PER_FRAME, TICKS_PER_FRAME, TIMESCALE};
+                int64_t after = after_call_ticks(card);
+                DecklinkHardwareClock after_call{after, after % TICKS_PER_FRAME, TICKS_PER_FRAME, TIMESCALE};
                 auto now = T0 + duration_cast<nanoseconds>(DecklinkOutputClockStats::fractional_seconds(host_s));
-                stats.record_handoff(hw, microseconds(500), now);
+                stats.record_handoff(ready, after_call, microseconds(500), now);
         }
 };
 }
@@ -128,6 +131,24 @@ decklink_output_clock_stats_test::test_jitter_at_boundary()
 
         CPPUNIT_ASSERT_EQUAL(uint64_t{49}, stats.get_repeated());
         CPPUNIT_ASSERT_EQUAL(uint64_t{50}, stats.get_skipped());
+        CPPUNIT_ASSERT_EQUAL(uint64_t{100}, stats.get_near_boundary());
+}
+
+void
+decklink_output_clock_stats_test::test_blocking_call_counts_shown_slot()
+{
+        DecklinkOutputClockStats stats;
+        stats.reset(true);
+        Simulation sim;
+        sim.card_offset_ticks = 995;
+        sim.jitter_ticks = [](int i) { return i % 2 == 0 ? 10 : -10; };
+        sim.after_call_ticks = [](int64_t ready) {
+                return (ready + TICKS_PER_FRAME / 2) / TICKS_PER_FRAME * TICKS_PER_FRAME + 5;
+        };
+        sim.run(stats, 100);
+
+        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_repeated());
+        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, stats.get_skipped());
         CPPUNIT_ASSERT_EQUAL(uint64_t{100}, stats.get_near_boundary());
 }
 
