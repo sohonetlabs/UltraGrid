@@ -73,6 +73,7 @@
 #include <iomanip>
 #include <iostream>
 #include <list>
+#include <mutex>
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -623,15 +624,35 @@ const char *get_commandline_param(const char *key)
         }
 }
 
+static mutex av_delay_lock;
+static int user_audio_delay;
+static int display_buffer_delay;
+
+static void apply_av_delay()
+{
+        int audio_delay = user_audio_delay + display_buffer_delay;
+	audio_offset = max(audio_delay, 0);
+	video_offset = audio_delay < 0 ? abs(audio_delay) : 0;
+}
+
 int get_audio_delay(void)
 {
-        return audio_offset > 0 ? audio_offset : -video_offset;
+        lock_guard<mutex> lk(av_delay_lock);
+        return user_audio_delay;
 }
 
 void set_audio_delay(int audio_delay)
 {
-	audio_offset = max(audio_delay, 0);
-	video_offset = audio_delay < 0 ? abs(audio_delay) : 0;
+        lock_guard<mutex> lk(av_delay_lock);
+        user_audio_delay = audio_delay;
+        apply_av_delay();
+}
+
+void set_display_buffer_delay(int delay_ms)
+{
+        lock_guard<mutex> lk(av_delay_lock);
+        display_buffer_delay = delay_ms;
+        apply_av_delay();
 }
 
 static struct {

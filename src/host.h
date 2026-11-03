@@ -118,6 +118,8 @@ extern volatile int audio_offset;
 extern volatile int video_offset;
 int get_audio_delay(void);
 void set_audio_delay(int val);
+/// Delay added to audio on top of get_audio_delay() to match the video held back by the display buffer.
+void set_display_buffer_delay(int delay_ms);
 
 #define RATE_UNLIMITED                0
 #define RATE_AUTO                   (-1) ///< spread packets evenly across frame time (currently 3/4)

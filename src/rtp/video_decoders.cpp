@@ -117,6 +117,7 @@
 #include "utils/color_out.h"
 #include "utils/macros.h"
 #include "utils/misc.h"
+#include "utils/output_pacer.hpp"
 #include "utils/stage_latency_stats.hpp"
 #include "utils/synchronized_queue.h"
 #include "utils/thread.h"
@@ -138,6 +139,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -982,6 +984,70 @@ static void notify_buffer_swapped(state_video_decoder* decoder) {
     decoder->buffer_swapped_cv.notify_one();
 }
 
+ADD_TO_PARAM("display-buffer", "* display-buffer=<frames>\n"
+                "  Hold back this many decoded frames, then hand one to the display every frame time\n"
+                "  (asynchronous decompressors only). Audio is delayed to match. 0 (default) - off\n");
+static unsigned get_display_buffer_length() {
+    const char *val = get_commandline_param("display-buffer");
+    return val == nullptr ? 0 : static_cast<unsigned>(std::max(atoi(val), 0));
+}
+
+/**
+ * Decoded frames waiting in the asynchronous decompressors for the display thread to collect.
+ * A frame needs all of its tiles, so this is the fewest waiting for any tile.
+ * @returns nothing if there is no decompressor or one can't report it
+ */
+static std::optional<size_t> count_frames_ready_to_collect(state_video_decoder* decoder) {
+    std::optional<size_t> ready;
+    for (auto state : decoder->decompress_state) {
+        size_t tile_ready = 0;
+        size_t len = sizeof tile_ready;
+        if (!state || !decompress_get_property(state, DECOMPRESS_PROPERTY_QUEUED_FRAMES, &tile_ready, &len)) {
+            return std::nullopt;
+        }
+        ready = std::min(ready.value_or(SIZE_MAX), tile_ready);
+    }
+    return ready;
+}
+
+/**
+ * Waits until the display buffer holds its depth, then discards any frames over its limit.
+ * @retval false if this frame can't be paced and goes to the display as soon as it's collected
+ */
+static bool display_buffer_wait(state_video_decoder* decoder, OutputPacer &pacer, double &pacer_fps) {
+    // Check if the decoder has been reconfigured with the video framerate.
+    double fps = decoder->frame ? decoder->frame->fps : 0;
+    if (fps <= 0) {
+        return false;
+    }
+
+    // Reset the pacer if the pacers FPS is out of sync with the decoders FPS.
+    if (fps != pacer_fps) {
+        pacer.reset(fps);
+        pacer_fps = fps;
+        set_display_buffer_delay(static_cast<int>(pacer.delay().count()));
+    }
+
+    std::optional<size_t> ready;
+    while (decoder->should_display.load()) {
+        ready = count_frames_ready_to_collect(decoder);
+        // Decompressors swapped mid-reconfigure; polling would hang if the new one can't report,
+        // so collect unpaced and let display_thread recheck it.
+        if (!ready) {
+            return false;
+        }
+
+        // Check if we are still priming or not and break out if we've built an appropriate queue.
+        if (!pacer.is_priming(*ready)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    for (size_t excess = pacer.excess(ready.value_or(0)); excess > 0 && async_collect_frame(decoder); --excess) {
+    }
+    return decoder->should_display.load();
+}
+
 /**
  * The display thread. This thread is responsible for collecting the frames from the decompression
  * API and displaying them. It can either receive from the asynchronous API provided by a decompression
@@ -996,12 +1062,23 @@ static void display_thread(void* args) {
     long long force_putf_timeout = get_force_putf_timeout();
     long long putf_timeout = force_putf_timeout != -1 ? force_putf_timeout : PUTF_NONBLOCK;
 
+    unsigned display_buffer_length = get_display_buffer_length();
+    std::unique_ptr<OutputPacer> pacer = display_buffer_length > 0 ? std::make_unique<OutputPacer>(display_buffer_length) : nullptr;
+    double pacer_fps = 0;
 
     while(decoder->should_display) {
         bool display_shutdown = false;
 
         // Find out if the collection needs to be completed asynchronously or not
         bool is_async = decoder_is_async(decoder);
+
+        // If you're using a pacer but we're not using an async decompressor then we can't effectively buffer.
+        if (pacer && !decoder->decompress_state.empty() && (!is_async || !count_frames_ready_to_collect(decoder))) {
+            LOG(LOG_LEVEL_WARNING) << "display-buffer needs an asynchronous decompressor that reports its queue, frames are not buffered\n";
+            pacer.reset();
+            set_display_buffer_delay(0);
+        }
+        bool paced = pacer && display_buffer_wait(decoder, *pacer, pacer_fps);
 
         // Collect the frame from either the async collection or the sync collection
         if(is_async) {
@@ -1014,6 +1091,13 @@ static void display_thread(void* args) {
         // The collection of the frame has indicated that we should exit.
         if(display_shutdown) {
             break;
+        }
+
+        // After the frame has been collected if we have a pacer, then wait until the even frame timing
+        // to push the frame into the display.
+        if (paced) {
+            size_t ready = count_frames_ready_to_collect(decoder).value_or(0);
+            std::this_thread::sleep_until(pacer->due(ready, OutputPacer::clock::now()));
         }
 
         // Display the frame

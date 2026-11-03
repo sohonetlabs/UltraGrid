@@ -197,7 +197,10 @@ static void *decompress_j2k_worker(void *args) {
         CHECK_OK(cmpto_j2k_dec_img_destroy(img), "Unable to to return processed image", NOOP);
 
         // Push into the queue before fetching the next frame
-        s->decompressed_frames.push({buffer, len});
+        {
+            std::lock_guard<std::mutex> lk(s->lock);
+            s->decompressed_frames.push({buffer, len});
+        }
     }
 
     return nullptr;
@@ -392,7 +395,7 @@ static decompress_status j2k_decompress(void *, unsigned char *, unsigned char *
 
 static int j2k_decompress_get_property(void *state, int property, void *val, size_t *len)
 {
-        UNUSED(state);
+        auto *s = static_cast<state_decompress_j2k *>(state);
         int ret = false;
 
         switch(property) {
@@ -409,6 +412,14 @@ static int j2k_decompress_get_property(void *state, int property, void *val, siz
                     ret = true;
                     break;
                 }
+                case DECOMPRESS_PROPERTY_QUEUED_FRAMES:
+                        if (*len >= sizeof(size_t)) {
+                                lock_guard<mutex> lk(s->lock);
+                                *static_cast<size_t *>(val) = s->decompressed_frames.size();
+                                *len = sizeof(size_t);
+                                ret = true;
+                        }
+                        break;
                 default:
                         ret = false;
         }

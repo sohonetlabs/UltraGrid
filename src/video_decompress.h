@@ -62,6 +62,7 @@ struct state_decompress;
  */
 #define DECOMPRESS_PROPERTY_ACCEPTS_CORRUPTED_FRAME  1          /* int */
 #define DECOMPRESS_PROPERTY_IS_ASYNC  2                         /* bool */
+#define DECOMPRESS_PROPERTY_QUEUED_FRAMES  3                     /* size_t, decoded frames waiting for async pop */
 
 /**
  * initializes decompression and returns internal state
