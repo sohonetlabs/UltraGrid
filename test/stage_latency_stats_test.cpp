@@ -131,4 +131,34 @@ stage_latency_stats_test::test_concurrent_records()
         CPPUNIT_ASSERT_EQUAL(uint64_t{THREADS * RECORDS}, stats.get_over_frame_time());
 }
 
+void
+stage_latency_stats_test::test_slow_frames_logged_when_enabled()
+{
+        StageLatencyStats quiet{"Test stats"};
+        StageLatencyStats logged{"Test stats", true};
+        for (auto *stats : {&quiet, &logged}) {
+                stats->record(microseconds(30000), 25, T0);
+                stats->record(microseconds(50000), 25, T0 + microseconds(40000));
+        }
+
+        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, quiet.get_slow_frames_logged());
+        CPPUNIT_ASSERT_EQUAL(uint64_t{1}, logged.get_slow_frames_logged());
+}
+
+void
+stage_latency_stats_test::test_slow_frame_logging_capped_per_report()
+{
+        StageLatencyStats stats{"Test stats", true};
+        auto last = T0;
+        for (uint64_t i = 0; i < StageLatencyStats::MAX_LOGGED_PER_REPORT + 10; ++i) {
+                last += microseconds(40000);
+                stats.record(microseconds(50000), 25, last);
+        }
+        CPPUNIT_ASSERT_EQUAL(StageLatencyStats::MAX_LOGGED_PER_REPORT, stats.get_slow_frames_logged());
+
+        stats.record(microseconds(50000), 25, last + StageLatencyStats::REPORT_INTERVAL + seconds(1));
+        stats.record(microseconds(50000), 25, last + StageLatencyStats::REPORT_INTERVAL + seconds(2));
+        CPPUNIT_ASSERT_EQUAL(StageLatencyStats::MAX_LOGGED_PER_REPORT + 1, stats.get_slow_frames_logged());
+}
+
 #endif // defined HAVE_CPPUNIT

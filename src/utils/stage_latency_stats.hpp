@@ -27,8 +27,11 @@ public:
         using clock = std::chrono::steady_clock;
 
         static constexpr std::chrono::seconds REPORT_INTERVAL{10};
+        static constexpr uint64_t MAX_LOGGED_PER_REPORT = 24;
 
-        explicit StageLatencyStats(std::string label) : label(std::move(label)) {}
+        /// With `log_slow_frames`, each frame over the frame time is also logged on its own line.
+        explicit StageLatencyStats(std::string label, bool log_slow_frames = false)
+                : label(std::move(label)), log_slow_frames(log_slow_frames) {}
 
         /// A frame is over the frame time only when `fps` is known (greater than zero).
         void record(clock::duration latency, double fps, clock::time_point now = clock::now()) {
@@ -42,6 +45,9 @@ public:
                 this->latency_min = std::min(this->latency_min, latency_us);
                 if (fps > 0 && latency > std::chrono::duration<double>(1.0 / fps)) {
                         this->over_frame_time++;
+                        if (this->log_slow_frames) {
+                                this->log_slow_frame(latency_us, fps);
+                        }
                 }
 
                 if (!this->has_report_start) {
@@ -62,6 +68,11 @@ public:
         uint64_t get_over_frame_time() {
                 std::lock_guard<std::mutex> lk(this->lock);
                 return this->over_frame_time;
+        }
+
+        uint64_t get_slow_frames_logged() {
+                std::lock_guard<std::mutex> lk(this->lock);
+                return this->slow_frames_logged;
         }
 
         std::chrono::microseconds get_latency_max() {
@@ -86,6 +97,22 @@ private:
                         : std::chrono::microseconds::zero();
         }
 
+        void log_slow_frame(std::chrono::microseconds latency, double fps) {
+                if (this->period_slow_frames++ >= MAX_LOGGED_PER_REPORT) {
+                        return;
+                }
+                this->slow_frames_logged++;
+                LOG(LOG_LEVEL_INFO) << std::fixed << std::setprecision(1)
+                                << this->label << " - Slow frame: "
+                                << SBOLD(this->frames)
+                                << " / Latency (ms): "
+                                << SBOLD(latency.count() / 1000.0)
+                                << " / Frame time (ms): "
+                                << SBOLD(1000.0 / fps)
+                                << (this->period_slow_frames == MAX_LOGGED_PER_REPORT ? " / No more logged until the next report" : "")
+                                << "\n";
+        }
+
         void report() const {
                 LOG(LOG_LEVEL_INFO) << std::fixed << std::setprecision(1)
                                 << SUNDERLINE(this->label << " (cumulative)")
@@ -107,12 +134,15 @@ private:
                 this->period_total = std::chrono::microseconds::zero();
                 this->latency_max = std::chrono::microseconds::zero();
                 this->latency_min = std::chrono::microseconds::max();
+                this->period_slow_frames = 0;
         }
 
         std::mutex lock;
         std::string label;
+        bool log_slow_frames;
         uint64_t frames = 0;
         uint64_t over_frame_time = 0;
+        uint64_t slow_frames_logged = 0;
 
         bool has_report_start = false;
         clock::time_point last_summary{};
@@ -122,6 +152,7 @@ private:
         std::chrono::microseconds period_total = std::chrono::microseconds::zero();
         std::chrono::microseconds latency_max = std::chrono::microseconds::zero();
         std::chrono::microseconds latency_min = std::chrono::microseconds::max();
+        uint64_t period_slow_frames = 0;
 };
 
 #endif // defined SRC_UTILS_STAGE_LATENCY_STATS_HPP_8E2A4C61_3B7D_4F19_A6C0_5D1E9B7F2A48

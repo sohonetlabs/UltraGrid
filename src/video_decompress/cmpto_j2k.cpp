@@ -93,7 +93,7 @@ struct state_decompress_j2k {
 
         unsigned long long int dropped{}; ///< number of dropped frames because queue was full
 
-        StageLatencyStats decode_stats{"J2K decode stats"};
+        StageLatencyStats decode_stats{"J2K decode stats", true};
 
         void (*convert)(unsigned char *dst_buffer,
                 unsigned char *src_buffer,

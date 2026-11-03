@@ -12,6 +12,8 @@ class stage_latency_stats_test : public CPPUNIT_NS::TestFixture
   CPPUNIT_TEST( test_unknown_fps_is_not_classified );
   CPPUNIT_TEST( test_report_resets_period );
   CPPUNIT_TEST( test_concurrent_records );
+  CPPUNIT_TEST( test_slow_frames_logged_when_enabled );
+  CPPUNIT_TEST( test_slow_frame_logging_capped_per_report );
   CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -26,6 +28,8 @@ public:
   void test_unknown_fps_is_not_classified();
   void test_report_resets_period();
   void test_concurrent_records();
+  void test_slow_frames_logged_when_enabled();
+  void test_slow_frame_logging_capped_per_report();
 };
 
 #endif // !defined STAGE_LATENCY_STATS_TEST_HPP_C4E7A9B2_1D5F_4B83_9E26_7A0C3F8D5B14

@@ -13,6 +13,8 @@ class frame_interval_stats_test : public CPPUNIT_NS::TestFixture
   CPPUNIT_TEST( test_record_follows_stream_fps );
   CPPUNIT_TEST( test_unknown_fps_is_not_classified );
   CPPUNIT_TEST( test_report_resets_period );
+  CPPUNIT_TEST( test_long_intervals_logged_when_enabled );
+  CPPUNIT_TEST( test_long_interval_logging_capped_per_report );
   CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -28,6 +30,8 @@ public:
   void test_record_follows_stream_fps();
   void test_unknown_fps_is_not_classified();
   void test_report_resets_period();
+  void test_long_intervals_logged_when_enabled();
+  void test_long_interval_logging_capped_per_report();
 };
 
 #endif // !defined FRAME_INTERVAL_STATS_TEST_HPP_3F1D6B52_8C0A_4E1F_A2D7_6E9B4C5A7F10
