@@ -27,8 +27,11 @@ public:
         static constexpr double LONG_INTERVAL_RATIO = 1.25;
         static constexpr double SHORT_INTERVAL_RATIO = 0.75;
         static constexpr std::chrono::seconds REPORT_INTERVAL{10};
+        static constexpr uint64_t MAX_LOGGED_PER_REPORT = 24;
 
-        explicit FrameIntervalStats(std::string label) : label(std::move(label)) {}
+        /// With `log_long_intervals`, each long interval is also logged on its own line.
+        explicit FrameIntervalStats(std::string label, bool log_long_intervals = false)
+                : label(std::move(label)), log_long_intervals(log_long_intervals) {}
 
         /// The next frame is not measured against the one preceding the call.
         void set_fps(double fps) {
@@ -56,6 +59,9 @@ public:
                 if (this->frame_time > std::chrono::nanoseconds::zero()) {
                         if (interval > LONG_INTERVAL_RATIO * this->frame_time) {
                                 this->long_intervals++;
+                                if (this->log_long_intervals) {
+                                        this->log_long_interval(interval);
+                                }
                         } else if (interval < SHORT_INTERVAL_RATIO * this->frame_time) {
                                 this->short_intervals++;
                         }
@@ -88,6 +94,10 @@ public:
                 return this->short_intervals;
         }
 
+        uint64_t get_long_intervals_logged() const {
+                return this->long_intervals_logged;
+        }
+
         std::chrono::microseconds get_interval_max() const {
                 return this->interval_max;
         }
@@ -97,6 +107,22 @@ public:
         }
 
 private:
+        void log_long_interval(std::chrono::microseconds interval) {
+                if (this->period_long_intervals++ >= MAX_LOGGED_PER_REPORT) {
+                        return;
+                }
+                this->long_intervals_logged++;
+                LOG(LOG_LEVEL_INFO) << std::fixed << std::setprecision(1)
+                                << this->label << " - Long interval: "
+                                << SBOLD(this->frames)
+                                << " / Time diff video (ms): "
+                                << SBOLD(interval.count() / 1000.0)
+                                << " / Frame time (ms): "
+                                << SBOLD(1000.0 / this->fps)
+                                << (this->period_long_intervals == MAX_LOGGED_PER_REPORT ? " / No more logged until the next report" : "")
+                                << "\n";
+        }
+
         void report() const {
                 LOG(LOG_LEVEL_INFO) << std::fixed << std::setprecision(1)
                                 << SUNDERLINE(this->label << " (cumulative)")
@@ -116,14 +142,17 @@ private:
         void reset_period() {
                 this->interval_max = std::chrono::microseconds::zero();
                 this->interval_min = std::chrono::microseconds::max();
+                this->period_long_intervals = 0;
         }
 
         std::string label;
+        bool log_long_intervals;
         double fps = 0;
         std::chrono::nanoseconds frame_time = std::chrono::nanoseconds::zero();
         uint64_t frames = 0;
         uint64_t long_intervals = 0;
         uint64_t short_intervals = 0;
+        uint64_t long_intervals_logged = 0;
 
         bool has_prev_frame = false;
 
@@ -133,6 +162,7 @@ private:
         // max/min cover only the time since the last report
         std::chrono::microseconds interval_max = std::chrono::microseconds::zero();
         std::chrono::microseconds interval_min = std::chrono::microseconds::max();
+        uint64_t period_long_intervals = 0;
 };
 
 #endif // defined SRC_UTILS_FRAME_INTERVAL_STATS_HPP_5B0E3C8E_7D5A_4B7E_9F0B_2C4E1B6A9D13
