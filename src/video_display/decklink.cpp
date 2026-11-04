@@ -60,7 +60,6 @@
 #include "rtp/audio_decoders.h"
 #include "tv.h"
 #include "ug_runtime_error.hpp"
-#include "utils/decklink_audio_write_stats.hpp"
 #include "utils/frame_interval_stats.hpp"
 #include "utils/misc.h"
 #include "utils/text.h" // is_prefix_of
@@ -364,7 +363,6 @@ struct state_decklink {
 
         AudioDriftFixer audio_drift_fixer{};
         FrameIntervalStats video_summary{"Decklink video stats", true};
-        DecklinkAudioWriteStats audio_write_stats;
  };
 
 static void show_help(bool full);
@@ -640,10 +638,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
                 }
 
                 if (s->low_latency) {
-                        auto call_start = chrono::steady_clock::now();
-                        s->audio_write_stats.video_call_started();
                         s->state[j].deckLinkOutput->DisplayVideoFrameSync(deckLinkFrame);
-                        s->audio_write_stats.video_call_ended(chrono::steady_clock::now() - call_start);
                         deckLinkFrame->Release();
                 } else {
                         s->state[j].deckLinkOutput->ScheduleVideoFrame(deckLinkFrame,
@@ -1514,7 +1509,6 @@ static void display_decklink_put_audio_frame(void *state, const struct audio_fra
         assert(s->play_audio);
 
         uint32_t sampleFramesWritten;
-        s->audio_write_stats.write_entered();
 
         uint32_t buffered = 0;
         s->state[0].deckLinkOutput->GetBufferedAudioSampleFrameCount(&buffered);
@@ -1532,11 +1526,9 @@ static void display_decklink_put_audio_frame(void *state, const struct audio_fra
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepDuration));
         }
 
-        s->audio_write_stats.write_call_started();
         if (s->low_latency) {
                 HRESULT res = s->state[0].deckLinkOutput->WriteAudioSamplesSync(frame->data, sampleFrameCount,
                                 &sampleFramesWritten);
-                s->audio_write_stats.write_finished(buffered);
                 if (FAILED(res)) {
                         log_msg(LOG_LEVEL_WARNING, MOD_NAME "WriteAudioSamplesSync failed.\n");
                         return;

@@ -250,7 +250,6 @@ REFLECTOR_OBJS = src/hd-rum-translator/hd-rum-decompress.o \
 TEST_OBJS = $(COMMON_OBJS) \
 	    @TEST_OBJS@ \
 	    test/codec_conversions_test.o \
-	    test/decklink_audio_write_stats_test.o \
 	    test/ff_codec_conversions_test.o \
 	    test/frame_interval_stats_test.o \
 	    test/get_framerate_test.o \
