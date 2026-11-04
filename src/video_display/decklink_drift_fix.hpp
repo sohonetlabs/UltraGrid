@@ -339,6 +339,10 @@ public:
                 this->target_buffer_fill = target_buffer;
         }
 
+        uint32_t get_target_buffer() const {
+                return this->target_buffer_fill;
+        }
+
         /**
          * @brief Set the root object
          * 

@@ -60,6 +60,7 @@
 #include "rtp/audio_decoders.h"
 #include "tv.h"
 #include "ug_runtime_error.hpp"
+#include "utils/audio_write_queue.hpp"
 #include "utils/frame_interval_stats.hpp"
 #include "utils/misc.h"
 #include "utils/text.h" // is_prefix_of
@@ -86,9 +87,12 @@
 #endif
 
 #define AUDIO_BUFFER_OVERFLOW_LIMIT 3500
+/// About 330 ms at 24p; older frames are dropped rather than adding more delay.
+#define AUDIO_WRITE_QUEUE_FRAMES 8
 
 static void print_output_modes(IDeckLink *);
 static void display_decklink_done(void *state);
+static void display_decklink_write_audio(struct state_decklink *s, const AudioWriteQueue::Frame &frame);
 
 // performs command, if failed, displays error and jumps to error label
 #define EXIT_IF_FAILED(cmd, name) \
@@ -363,6 +367,7 @@ struct state_decklink {
 
         AudioDriftFixer audio_drift_fixer{};
         FrameIntervalStats video_summary{"Decklink video stats", true};
+        std::unique_ptr<AudioWriteQueue> audio_write_queue;
  };
 
 static void show_help(bool full);
@@ -596,6 +601,20 @@ static void update_timecode(DeckLinkTimecode *tc, double fps)
         tc->SetBCD(bcd);
 }
 
+/**
+ * The card doesn't play audio out until video is running, so audio written earlier only builds up
+ * and plays late. Start from the drift fixer's target fill instead, dropping the older audio.
+ */
+static void start_audio_with_video(struct state_decklink *s)
+{
+        uint32_t buffered = 0;
+        s->state[0].deckLinkOutput->GetBufferedAudioSampleFrameCount(&buffered);
+        uint32_t target = s->audio_drift_fixer.get_target_buffer();
+        size_t dropped = s->audio_write_queue->release(buffered < target ? target - buffered : 0);
+        LOG(LOG_LEVEL_INFO) << MOD_NAME << "Audio started with video, dropped "
+                        << dropped * 1000 / bmdAudioSampleRate48kHz << " ms of audio queued before it\n";
+}
+
 static int display_decklink_putf(void *state, struct video_frame *frame, long long timeout_ns)
 {
         struct state_decklink *s = (struct state_decklink *)state;
@@ -648,6 +667,9 @@ static int display_decklink_putf(void *state, struct video_frame *frame, long lo
         s->frames++;
         if(s->emit_timecode) {
                 update_timecode(s->timecode, s->vid_desc.fps);
+        }
+        if (s->audio_write_queue && s->audio_write_queue->is_held()) {
+                start_audio_with_video(s);
         }
 
         frame->callbacks.dispose(frame);
@@ -744,6 +766,9 @@ display_decklink_reconfigure_video(void *state, struct video_desc desc)
 
         assert(s->magic == DECKLINK_MAGIC);
         
+        if (s->audio_write_queue) {
+                s->audio_write_queue->hold();
+        }
         s->vid_desc = desc;
         s->video_summary.set_fps(desc.fps);
 
@@ -1339,6 +1364,13 @@ static void *display_decklink_init(struct module *parent, const char *fmt, unsig
         s->frames = 0;
         s->initialized_audio = s->initialized_video = false;
 
+        if (s->play_audio) {
+                s->audio_write_queue = std::make_unique<AudioWriteQueue>(
+                                [s](const AudioWriteQueue::Frame &frame) { display_decklink_write_audio(s, frame); },
+                                AUDIO_WRITE_QUEUE_FRAMES);
+                s->audio_write_queue->hold();
+        }
+
         return (void *)s;
 error:
         display_decklink_done(s);
@@ -1357,6 +1389,8 @@ static void display_decklink_done(void *state)
         struct state_decklink *s = (struct state_decklink *)state;
 
         assert (s != NULL);
+
+        s->audio_write_queue.reset();
 
         for (int i = 0; i < s->devices_cnt; ++i)
         {
@@ -1504,10 +1538,25 @@ static int display_decklink_get_property(void *state, int property, void *val, s
 static void display_decklink_put_audio_frame(void *state, const struct audio_frame *frame)
 {
         struct state_decklink *s = (struct state_decklink *)state;
-        unsigned int sampleFrameCount = frame->data_len / (frame->bps * frame->ch_count);
-
         assert(s->play_audio);
 
+        if (!s->audio_write_queue->push(frame->data, frame->data_len, frame->bps, frame->ch_count)
+                        && !s->audio_write_queue->is_held()) {
+                LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio write queue full, oldest frame dropped ("
+                                << s->audio_write_queue->get_dropped_frames() << " so far)\n";
+        }
+}
+
+/// Runs on the audio write queue's thread.
+static void display_decklink_write_audio(struct state_decklink *s, const AudioWriteQueue::Frame &frame)
+{
+        unique_lock<mutex> lk(s->reconfiguration_lock);
+        if (!s->initialized_audio || frame.bps != s->aud_desc.bps || frame.ch_count != s->aud_desc.ch_count) {
+                return;
+        }
+        lk.unlock();
+
+        unsigned int sampleFrameCount = frame.data.size() / (frame.bps * frame.ch_count);
         uint32_t sampleFramesWritten;
 
         uint32_t buffered = 0;
@@ -1526,20 +1575,25 @@ static void display_decklink_put_audio_frame(void *state, const struct audio_fra
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepDuration));
         }
 
+        lk.lock();
+        if (!s->initialized_audio) {
+                return;
+        }
         if (s->low_latency) {
-                HRESULT res = s->state[0].deckLinkOutput->WriteAudioSamplesSync(frame->data, sampleFrameCount,
+                HRESULT res = s->state[0].deckLinkOutput->WriteAudioSamplesSync(const_cast<char *>(frame.data.data()), sampleFrameCount,
                                 &sampleFramesWritten);
                 if (FAILED(res)) {
                         log_msg(LOG_LEVEL_WARNING, MOD_NAME "WriteAudioSamplesSync failed.\n");
                         return;
                 }
         } else {
-                s->state[0].deckLinkOutput->ScheduleAudioSamples(frame->data, sampleFrameCount, 0,
+                s->state[0].deckLinkOutput->ScheduleAudioSamples(const_cast<char *>(frame.data.data()), sampleFrameCount, 0,
                                 0, &sampleFramesWritten);
         }
         if (sampleFramesWritten != sampleFrameCount) {
                  LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio buffer overflow! (" << sampleFramesWritten << " written, " << sampleFrameCount - sampleFramesWritten << " dropped, " << buffered << " buffer size)\n";
         }
+        lk.unlock();
         s->audio_drift_fixer.update(buffered, sampleFrameCount, sampleFramesWritten);
 }
 
@@ -1548,6 +1602,7 @@ static int display_decklink_reconfigure_audio(void *state, int quant_samples, in
         struct state_decklink *s = (struct state_decklink *)state;
         BMDAudioSampleType sample_type;
 
+        s->audio_write_queue->clear();
         unique_lock<mutex> lk(s->reconfiguration_lock);
 
         assert(s->play_audio);
