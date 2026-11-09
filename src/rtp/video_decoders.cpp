@@ -297,6 +297,7 @@ struct frame_msg {
         struct reported_statistics_cumul &stats;
         bool is_corrupted = false;
         bool is_displayed = false;
+        bool requeued = false; ///< already triggered a reconfigure and was put back in the FEC queue
 };
 
 struct main_msg_reconfigure {
@@ -485,7 +486,11 @@ static void *fec_thread(void *args) {
                                 parse_video_hdr(video_hdr, &network_desc);
                                 if (!video_desc_eq_excl_param(decoder->received_vid_desc,
                                                         network_desc, PARAM_TILE_COUNT)) {
-                                        decoder->msg_queue.push(new main_msg_reconfigure(network_desc, std::move(data)));
+                                        // A frame may trigger only one reconfigure. If it was put back after its
+                                        // reconfigure and the format has moved on again, it is stale, so drop it.
+                                        if (!data->requeued) {
+                                                decoder->msg_queue.push(new main_msg_reconfigure(network_desc, std::move(data)));
+                                        }
                                         goto cleanup;
                                 }
 
@@ -2114,6 +2119,7 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
 #endif
         }
         if (msg_reconf->last_frame) {
+                msg_reconf->last_frame->requeued = true;
                 decoder->fec_queue.push(std::move(msg_reconf->last_frame));
         }
         delete msg_reconf;
