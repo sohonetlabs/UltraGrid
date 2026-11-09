@@ -2112,6 +2112,16 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
     // be writing into it).
     main_msg_reconfigure *msg_reconf;
     while ((msg_reconf = decoder->msg_queue.pop(true /* nonblock */))) {
+        // A probe reports the detected codec for every frame it handles, so several of these
+        // queue up per format change. Only the first one for the current format is needed.
+        if (msg_reconf->compress_internal_codec != VIDEO_CODEC_NONE &&
+                        (decoder->out_codec != VIDEO_CODEC_END ||
+                         !video_desc_eq_excl_param(msg_reconf->desc, decoder->received_vid_desc, PARAM_TILE_COUNT))) {
+            LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << "Ignoring detected codec " << get_codec_name(msg_reconf->compress_internal_codec)
+                    << " for " << msg_reconf->desc << ", already applied or format has changed\n";
+            delete msg_reconf;
+            continue;
+        }
         if (reconfigure_if_needed(decoder, msg_reconf->desc, msg_reconf->force, msg_reconf->compress_internal_codec)) {
 #ifdef RECONFIGURE_IN_FUTURE_THREAD
             vf_free(frame);
