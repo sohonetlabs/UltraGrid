@@ -1772,6 +1772,10 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
         decoder->frame = NULL;
 
         if (desc_changed) {
+                // Only written once the threads have stopped. They read it unlocked, and frames
+                // drained by the stop must be checked and reported against their own format.
+                decoder->received_vid_desc = desc;
+
                 // A new format gets a fresh start: codecs blacklisted for the previous
                 // format are allowed again, and out_codec is cleared because a leftover
                 // VIDEO_CODEC_END (probe still in progress) would make
@@ -1839,8 +1843,8 @@ static int reconfigure_if_needed(struct state_video_decoder *decoder,
 
         if (desc_changed) {
                 LOG(LOG_LEVEL_NOTICE) << "[video dec.] New incoming video format detected: " << network_desc << endl;
-                decoder->received_vid_desc = network_desc;
         }
+        struct video_desc desc = desc_changed ? network_desc : decoder->received_vid_desc;
 
         if(force){
                 log_msg(LOG_LEVEL_VERBOSE, "forced reconf\n");
@@ -1851,7 +1855,7 @@ static int reconfigure_if_needed(struct state_video_decoder *decoder,
         decoder->reconfiguration_future = std::async(std::launch::async,
                         [decoder](){ return reconfigure_decoder(decoder, decoder->received_vid_desc); });
 #else
-        int ret = reconfigure_decoder(decoder, decoder->received_vid_desc, comp_int_fmt, desc_changed);
+        int ret = reconfigure_decoder(decoder, desc, comp_int_fmt, desc_changed);
         if (!ret) {
                 log_msg(LOG_LEVEL_ERROR, "[video dec.] Reconfiguration failed!!!\n");
         }
