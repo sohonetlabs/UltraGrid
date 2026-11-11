@@ -991,7 +991,7 @@ static void display_thread(void* args) {
                 break;
             }
             else {
-                // Probe output was written to a scratch buffer and has no picture to show.
+                // A frame that the previous session left in the queue. There is no output buffer for it.
                 vf_free(display_frame.release());
                 continue;
             }
@@ -1570,7 +1570,7 @@ static bool configure_decoder(struct state_video_decoder *decoder,
         // Make it visible when the display receives fewer bits than the stream
         // carries (eg. a 12-bit R12L stream output as 10-bit R10k), either because
         // the display lacks the format or because it was blacklisted.
-        if (comp_int_fmt != VIDEO_CODEC_NONE && out_codec != VIDEO_CODEC_END &&
+        if (comp_int_fmt != VIDEO_CODEC_NONE &&
                         get_bits_per_component(out_codec) < get_bits_per_component(comp_int_fmt)) {
                 LOG(LOG_LEVEL_WARNING) << MOD_NAME << "Stream internal codec " << get_codec_name(comp_int_fmt)
                         << " is being decoded to lower bit depth codec " << get_codec_name(out_codec) << "\n";
@@ -1766,7 +1766,7 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
         // calls into the decompress states, so letting it run while they are being
         // destroyed and recreated leaves it calling the wrong (or a freed) decompress.
         video_decoder_stop_threads(decoder);
-        // Discarding the frame flushes the pipelined data.
+        // The stop above flushed the pipelined frames. Return the unused display buffer.
         if (decoder->frame)
                 display_put_frame(decoder->display, decoder->frame, PUTF_DISCARD);
         decoder->frame = NULL;
@@ -1786,7 +1786,6 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
 
         bool ret = configure_decoder(decoder, desc, comp_int_fmt);
         if (!ret) {
-                decoder->frame = NULL;
                 decoder->out_codec = VIDEO_CODEC_NONE;
         }
 
