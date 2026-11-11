@@ -2112,13 +2112,17 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
     // be writing into it).
     main_msg_reconfigure *msg_reconf;
     while ((msg_reconf = decoder->msg_queue.pop(true /* nonblock */))) {
+        // Forced messages come from the decompress thread and describe its decoder. One for
+        // another format is about a decoder that has since been replaced.
+        bool stale = msg_reconf->force &&
+                !video_desc_eq_excl_param(msg_reconf->desc, decoder->received_vid_desc, PARAM_TILE_COUNT);
         // A probe reports the detected codec for every frame it handles, so several of these
-        // queue up per format change. Only the first one for the current format is needed.
-        if (msg_reconf->compress_internal_codec != VIDEO_CODEC_NONE &&
-                        (decoder->out_codec != VIDEO_CODEC_END ||
-                         !video_desc_eq_excl_param(msg_reconf->desc, decoder->received_vid_desc, PARAM_TILE_COUNT))) {
-            LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << "Ignoring detected codec " << get_codec_name(msg_reconf->compress_internal_codec)
-                    << " for " << msg_reconf->desc << ", already applied or format has changed\n";
+        // queue up per format change. Only the first one is needed.
+        bool applied = msg_reconf->compress_internal_codec != VIDEO_CODEC_NONE &&
+                decoder->out_codec != VIDEO_CODEC_END;
+        if (stale || applied) {
+            LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << "Ignoring " << (stale ? "stale" : "already applied")
+                    << " forced reconfigure for " << msg_reconf->desc << "\n";
             delete msg_reconf;
             continue;
         }
