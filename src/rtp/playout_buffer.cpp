@@ -311,6 +311,13 @@ unsigned int BufferFrame::getRtpTimestamp() {
 }
 
 /**
+ * @brief Getter for the arrival time of the first packet in the frame
+ */
+std::chrono::steady_clock::time_point BufferFrame::getArrivalTime() {
+    return this->arrivalTime;
+}
+
+/**
  * @brief Getter for if the frame is "complete" or not. This relies on seeing either
  *        the last packet in the frame (marked with the 'm' bit) or a packet from the
  *        next frame.

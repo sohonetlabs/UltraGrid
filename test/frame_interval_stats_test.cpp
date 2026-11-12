@@ -162,4 +162,42 @@ frame_interval_stats_test::test_report_resets_period()
         CPPUNIT_ASSERT(microseconds(40000) == summary.get_interval_min());
 }
 
+void
+frame_interval_stats_test::test_long_intervals_logged_when_enabled()
+{
+        FrameIntervalStats quiet{"Test stats"};
+        FrameIntervalStats logged{"Test stats", true};
+        for (auto *summary : {&quiet, &logged}) {
+                summary->set_fps(25);
+                summary->record(T0);
+                summary->record(T0 + microseconds(40000));
+                summary->record(T0 + microseconds(110000));
+                summary->record(T0 + microseconds(120000));
+        }
+
+        CPPUNIT_ASSERT_EQUAL(uint64_t{0}, quiet.get_long_intervals_logged());
+        CPPUNIT_ASSERT_EQUAL(uint64_t{1}, logged.get_long_intervals_logged());
+}
+
+void
+frame_interval_stats_test::test_long_interval_logging_capped_per_report()
+{
+        FrameIntervalStats summary{"Test stats", true};
+        summary.set_fps(25);
+        auto last = T0;
+        summary.record(last);
+        for (uint64_t i = 0; i < FrameIntervalStats::MAX_LOGGED_PER_REPORT + 10; ++i) {
+                last += microseconds(80000);
+                summary.record(last);
+        }
+        CPPUNIT_ASSERT_EQUAL(FrameIntervalStats::MAX_LOGGED_PER_REPORT, summary.get_long_intervals_logged());
+
+        while (last - T0 <= FrameIntervalStats::REPORT_INTERVAL) {
+                last += microseconds(40000);
+                summary.record(last);
+        }
+        summary.record(last + microseconds(80000));
+        CPPUNIT_ASSERT_EQUAL(FrameIntervalStats::MAX_LOGGED_PER_REPORT + 1, summary.get_long_intervals_logged());
+}
+
 #endif // defined HAVE_CPPUNIT

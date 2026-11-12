@@ -362,7 +362,7 @@ struct state_decklink {
         bool                keep_device_defaults = false;
 
         AudioDriftFixer audio_drift_fixer{};
-        FrameIntervalStats video_summary{"Decklink video stats"};
+        FrameIntervalStats video_summary{"Decklink video stats", true};
  };
 
 static void show_help(bool full);
