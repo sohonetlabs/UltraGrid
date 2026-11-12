@@ -297,6 +297,7 @@ struct frame_msg {
         struct reported_statistics_cumul &stats;
         bool is_corrupted = false;
         bool is_displayed = false;
+        bool requeued = false; ///< already triggered a reconfigure and was put back in the FEC queue
 };
 
 struct main_msg_reconfigure {
@@ -486,7 +487,11 @@ static void *fec_thread(void *args) {
                                 parse_video_hdr(video_hdr, &network_desc);
                                 if (!video_desc_eq_excl_param(decoder->received_vid_desc,
                                                         network_desc, PARAM_TILE_COUNT)) {
-                                        decoder->msg_queue.push(new main_msg_reconfigure(network_desc, std::move(data)));
+                                        // A frame may trigger only one reconfigure. If it was put back after its
+                                        // reconfigure and the format has moved on again, it is stale, so drop it.
+                                        if (!data->requeued) {
+                                                decoder->msg_queue.push(new main_msg_reconfigure(network_desc, std::move(data)));
+                                        }
                                         goto cleanup;
                                 }
 
@@ -2176,6 +2181,20 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
     // be writing into it).
     main_msg_reconfigure *msg_reconf;
     while ((msg_reconf = decoder->msg_queue.pop(true /* nonblock */))) {
+        // Forced messages come from the decompress thread and describe its decoder. One for
+        // another format is about a decoder that has since been replaced.
+        bool stale = msg_reconf->force &&
+                !video_desc_eq_excl_param(msg_reconf->desc, decoder->received_vid_desc, PARAM_TILE_COUNT);
+        // A probe reports the detected codec for every frame it handles, so several of these
+        // queue up per format change. Only the first one is needed.
+        bool applied = msg_reconf->compress_internal_codec != VIDEO_CODEC_NONE &&
+                decoder->out_codec != VIDEO_CODEC_END;
+        if (stale || applied) {
+            LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << "Ignoring " << (stale ? "stale" : "already applied")
+                    << " forced reconfigure for " << msg_reconf->desc << "\n";
+            delete msg_reconf;
+            continue;
+        }
         if (reconfigure_if_needed(decoder, msg_reconf->desc, msg_reconf->force, msg_reconf->compress_internal_codec)) {
 #ifdef RECONFIGURE_IN_FUTURE_THREAD
             vf_free(frame);
@@ -2183,6 +2202,7 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
 #endif
         }
         if (msg_reconf->last_frame) {
+                msg_reconf->last_frame->requeued = true;
                 decoder->fec_queue.push(std::move(msg_reconf->last_frame));
         }
         delete msg_reconf;
