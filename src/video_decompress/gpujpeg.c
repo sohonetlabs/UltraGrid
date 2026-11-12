@@ -336,12 +336,16 @@ static const struct decode_from_to *gpujpeg_decompress_get_decoders() {
         return ret;
 }
 
+// This module is synchronous only, so the async API must never be called. If it is,
+// report "no frame" rather than leave the result undefined.
 static decompress_status gpujpeg_decompress_empty_push(void *state, unsigned char *compressed, unsigned int compressed_len, codec_t* internal_codec) {
     log_msg(LOG_LEVEL_ERROR, "This decompression module does not support asynchronously processing video frames\n");
+    return DECODER_NO_FRAME;
 }
 
-static void gpujpeg_decompress_empty_pop(void *state, decompress_status *status, struct video_frame *display_frame) {
+static void gpujpeg_decompress_empty_pop(void *state, decompress_status *status, struct video_frame *display_frame, int tile_index) {
     log_msg(LOG_LEVEL_ERROR, "This decompression module does not support asynchronously processing video frames\n");
+    *status = DECODER_NO_FRAME;
 }
 
 static const struct video_decompress_info gpujpeg_info = {

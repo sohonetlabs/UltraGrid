@@ -167,7 +167,7 @@ typedef void (*change_il_t)(char *dst, char *src, int linesize, int height, void
 
 // prototypes
 static bool reconfigure_decoder(struct state_video_decoder *decoder,
-                struct video_desc desc, codec_t comp_int_fmt);
+                struct video_desc desc, codec_t comp_int_fmt, bool desc_changed);
 static int check_for_mode_change(struct state_video_decoder *decoder, uint32_t *hdr);
 static void wait_for_framebuffer_swap(struct state_video_decoder *decoder);
 static void *fec_thread(void *args);
@@ -343,7 +343,8 @@ struct state_video_decoder
 
         struct display   *display = NULL; ///< assigned display device
         /// @{
-        vector<codec_t>   native_codecs; ///< list of display native codecs
+        vector<codec_t>   native_codecs; ///< list of display native codecs, minus blacklisted ones
+        vector<codec_t>   display_codecs; ///< unfiltered native_codecs, restored on a format change
         enum interlacing_t *disp_supported_il = NULL; ///< display supported interlacing mode
         size_t            disp_supported_il_cnt = 0; ///< count of @ref disp_supported_il
         /// @}
@@ -568,7 +569,8 @@ static bool blacklist_current_out_codec(struct state_video_decoder *decoder){
         if (to_erase == decoder->native_codecs.end()) {
                 return true; // should it really return true?
         }
-        log_msg(LOG_LEVEL_DEBUG, "Blacklisting codec %s\n", get_codec_name(decoder->out_codec));
+        log_msg(LOG_LEVEL_WARNING, MOD_NAME "Decompression to %s failed, blacklisting it for the current format\n",
+                        get_codec_name(decoder->out_codec));
         decoder->native_codecs.erase(to_erase);
 
         return true;
@@ -980,6 +982,21 @@ static void display_thread(void* args) {
     while(decoder->should_display) {
         bool display_shutdown = false;
 
+        // decoder->frame is the display's output buffer. It is NULL while the decoder is
+        // probing the stream (or after a failed configure), when the display has no output
+        // format. Wait on the display queue for the stop poison (nullptr) instead.
+        if(!decoder->frame) {
+            std::unique_ptr<video_frame> display_frame = decoder->display_queue.pop();
+            if(!display_frame) {
+                break;
+            }
+            else {
+                // A frame that the previous session left in the queue. There is no output buffer for it.
+                vf_free(display_frame.release());
+                continue;
+            }
+        }
+
         // Find out if the collection needs to be completed asynchronously or not
         bool is_async = decoder_is_async(decoder);
 
@@ -1212,6 +1229,7 @@ bool video_decoder_register_display(struct state_video_decoder *decoder, struct 
                         return false;
                 }
         }
+        decoder->display_codecs = decoder->native_codecs;
 
         free(decoder->disp_supported_il);
         decoder->disp_supported_il_cnt = 20 * sizeof(enum interlacing_t);
@@ -1514,16 +1532,18 @@ static change_il_t select_il_func(enum interlacing_t in_il, enum interlacing_t *
 }
 
 /**
- * Reconfigures decoder if network received video data format has changed.
+ * Configures the decoder (decompress states, display and frame buffer) for the
+ * given video description. Must only be called while the decoder threads are
+ * stopped, see reconfigure_decoder().
  *
  * @param decoder       the video decoder state
- * @param desc          new video description to be reconfigured to
- * @return              boolean value if reconfiguration was successful
+ * @param desc          new video description to be configured to
+ * @return              boolean value if configuration was successful
  *
  * @invariant
  * decoder->display != NULL
  */
-static bool reconfigure_decoder(struct state_video_decoder *decoder,
+static bool configure_decoder(struct state_video_decoder *decoder,
                 struct video_desc desc, codec_t comp_int_fmt)
 {
         codec_t out_codec;
@@ -1533,13 +1553,7 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
         int display_requested_pitch = PITCH_DEFAULT;
         int display_requested_rgb_shift[] = DEFAULT_RGB_SHIFT_INIT;
 
-        // this code forces flushing the pipelined data
-        video_decoder_stop_threads(decoder);
-        if (decoder->frame)
-                display_put_frame(decoder->display, decoder->frame, PUTF_DISCARD);
-        decoder->frame = NULL;
-        video_decoder_start_threads(decoder);
-
+        // Destroys the previous decompress states, so no thread may be using them.
         cleanup(decoder);
 
         desc.tile_count = get_video_mode_tiles_x(decoder->video_mode)
@@ -1552,6 +1566,15 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
                 return false;
         }
         decoder->out_codec = out_codec;
+
+        // Make it visible when the display receives fewer bits than the stream
+        // carries (eg. a 12-bit R12L stream output as 10-bit R10k), either because
+        // the display lacks the format or because it was blacklisted.
+        if (comp_int_fmt != VIDEO_CODEC_NONE &&
+                        get_bits_per_component(out_codec) < get_bits_per_component(comp_int_fmt)) {
+                LOG(LOG_LEVEL_WARNING) << MOD_NAME << "Stream internal codec " << get_codec_name(comp_int_fmt)
+                        << " is being decoded to lower bit depth codec " << get_codec_name(out_codec) << "\n";
+        }
         struct video_desc display_desc = desc;
 
         int display_mode;
@@ -1724,6 +1747,54 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
         return true;
 }
 
+/**
+ * Reconfigures decoder if network received video data format has changed.
+ *
+ * @param decoder       the video decoder state
+ * @param desc          new video description to be reconfigured to
+ * @param desc_changed  whether desc differs from the previously received one
+ *                      (false for forced reconfigurations of the same format)
+ * @return              boolean value if reconfiguration was successful
+ *
+ * @invariant
+ * decoder->display != NULL
+ */
+static bool reconfigure_decoder(struct state_video_decoder *decoder,
+                struct video_desc desc, codec_t comp_int_fmt, bool desc_changed)
+{
+        // The threads stay stopped for the whole reconfiguration. The display thread
+        // calls into the decompress states, so letting it run while they are being
+        // destroyed and recreated leaves it calling the wrong (or a freed) decompress.
+        video_decoder_stop_threads(decoder);
+        // The stop above flushed the pipelined frames. Return the unused display buffer.
+        if (decoder->frame)
+                display_put_frame(decoder->display, decoder->frame, PUTF_DISCARD);
+        decoder->frame = NULL;
+
+        if (desc_changed) {
+                // Only written once the threads have stopped. They read it unlocked, and frames
+                // drained by the stop must be checked and reported against their own format.
+                decoder->received_vid_desc = desc;
+
+                // A new format gets a fresh start: codecs blacklisted for the previous
+                // format are allowed again, and out_codec is cleared because a leftover
+                // VIDEO_CODEC_END (probe still in progress) would make
+                // choose_codec_and_decoder() skip probing the new format.
+                decoder->native_codecs = decoder->display_codecs;
+                decoder->out_codec = VIDEO_CODEC_NONE;
+        }
+
+        bool ret = configure_decoder(decoder, desc, comp_int_fmt);
+        if (!ret) {
+                decoder->out_codec = VIDEO_CODEC_NONE;
+        }
+
+        // Restart even after a failure so received frames keep being consumed.
+        video_decoder_start_threads(decoder);
+
+        return ret;
+}
+
 bool parse_video_hdr(uint32_t *hdr, struct video_desc *desc)
 {
         uint32_t tmp;
@@ -1771,8 +1842,8 @@ static int reconfigure_if_needed(struct state_video_decoder *decoder,
 
         if (desc_changed) {
                 LOG(LOG_LEVEL_NOTICE) << "[video dec.] New incoming video format detected: " << network_desc << endl;
-                decoder->received_vid_desc = network_desc;
         }
+        struct video_desc desc = desc_changed ? network_desc : decoder->received_vid_desc;
 
         if(force){
                 log_msg(LOG_LEVEL_VERBOSE, "forced reconf\n");
@@ -1783,11 +1854,9 @@ static int reconfigure_if_needed(struct state_video_decoder *decoder,
         decoder->reconfiguration_future = std::async(std::launch::async,
                         [decoder](){ return reconfigure_decoder(decoder, decoder->received_vid_desc); });
 #else
-        int ret = reconfigure_decoder(decoder, decoder->received_vid_desc, comp_int_fmt);
+        int ret = reconfigure_decoder(decoder, desc, comp_int_fmt, desc_changed);
         if (!ret) {
                 log_msg(LOG_LEVEL_ERROR, "[video dec.] Reconfiguration failed!!!\n");
-                decoder->frame = NULL;
-                decoder->out_codec = VIDEO_CODEC_NONE;
         }
 #endif
         return TRUE;
