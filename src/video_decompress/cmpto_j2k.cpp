@@ -83,6 +83,7 @@ struct state_decompress_j2k {
 
         struct video_desc desc{};
         codec_t out_codec{};
+        int stream_bit_depth{}; ///< of the codestreams decoded since the last reconfigure
 
         mutex lock;
         queue<pair<char *, size_t>> decompressed_frames; ///< buffer, length
@@ -345,6 +346,7 @@ static int j2k_decompress_reconfigure(void *state, struct video_desc desc,
         s->desc = desc;
         s->out_codec = out_codec;
         s->pitch = pitch;
+        s->stream_bit_depth = 0;
 
         return true;
 }
@@ -381,6 +383,21 @@ static decompress_status j2k_probe_internal_codec(codec_t in_codec, unsigned cha
         log_msg(LOG_LEVEL_VERBOSE, "J2K color space: %s\n", get_codec_name(*internal_codec));
 
         return DECODER_GOT_CODEC;
+}
+
+// Bit depth is not part of the network video description, so a sender switching
+// eg. between 10 and 12-bit capture shows up only in the codestream.
+static bool stream_bit_depth_changed(struct state_decompress_j2k *s, unsigned char *cstream, size_t len) {
+        struct cmpto_j2k_dec_comp_info comp_info;
+        if (cmpto_j2k_dec_cstream_get_comp_info(cstream, len, 0, &comp_info) != CMPTO_OK) {
+                return false;
+        }
+
+        int previous_bit_depth = s->stream_bit_depth;
+        s->stream_bit_depth = comp_info.bit_depth;
+
+        // A previous bit depth of 0 (first frame since reconfigure) also counts as a change
+        return previous_bit_depth != comp_info.bit_depth;
 }
 
 static decompress_status j2k_decompress(void *, unsigned char *, unsigned char *,
@@ -471,7 +488,7 @@ static decompress_status j2k_decompress_empty_push(void *state, unsigned char *c
         StageLatencyStats::clock::time_point pushed_at;
 
         // Sent a notice saying there needs to be a reconfiguration completed if the video codecs don't match.
-        if (s->out_codec == VIDEO_CODEC_NONE) {
+        if (s->out_codec == VIDEO_CODEC_NONE || stream_bit_depth_changed(s, compressed, compressed_len)) {
                 return j2k_probe_internal_codec(s->desc.color_spec, compressed, compressed_len, internal_codec);
         }
 

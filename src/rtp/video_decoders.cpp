@@ -371,6 +371,7 @@ struct state_video_decoder
         synchronized_queue<unique_ptr<video_frame>, 1> display_queue;
 
         codec_t           out_codec = VIDEO_CODEC_NONE;
+        codec_t           comp_int_fmt = VIDEO_CODEC_NONE; ///< probed internal codec the decoder is configured for
         int               pitch = 0;
 
         synchronized_queue<unique_ptr<frame_msg>, 1> fec_queue;
@@ -1809,6 +1810,7 @@ static bool reconfigure_decoder(struct state_video_decoder *decoder,
                 decoder->out_codec = VIDEO_CODEC_NONE;
         }
 
+        decoder->comp_int_fmt = comp_int_fmt;
         bool ret = configure_decoder(decoder, desc, comp_int_fmt);
         if (!ret) {
                 decoder->out_codec = VIDEO_CODEC_NONE;
@@ -2205,10 +2207,10 @@ bool decode_video_frame(std::unique_ptr<BufferFrame> bufferFrame, vcodec_state* 
         // another format is about a decoder that has since been replaced.
         bool stale = msg_reconf->force &&
                 !video_desc_eq_excl_param(msg_reconf->desc, decoder->received_vid_desc, PARAM_TILE_COUNT);
-        // A probe reports the detected codec for every frame it handles, so several of these
-        // queue up per format change. Only the first one is needed.
+        // Decompressors re-report the codec they are configured for (eg. J2K after each reconfigure).
+        // Reconfiguring on those would loop, so only a different codec is applied.
         bool applied = msg_reconf->compress_internal_codec != VIDEO_CODEC_NONE &&
-                decoder->out_codec != VIDEO_CODEC_END;
+                msg_reconf->compress_internal_codec == decoder->comp_int_fmt;
         if (stale || applied) {
             LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << "Ignoring " << (stale ? "stale" : "already applied")
                     << " forced reconfigure for " << msg_reconf->desc << "\n";
